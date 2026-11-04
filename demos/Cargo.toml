@@ -1,0 +1,9 @@
+# The demo apps: deliberately a separate workspace from the Scry.Rust library in ../scry, so they
+# consume it the way an outside project would - through a dependency, not as a workspace sibling.
+[workspace]
+resolver = "3"
+members = ["console-demo", "dx-demo"]
+
+[workspace.package]
+edition = "2024"
+publish = false
