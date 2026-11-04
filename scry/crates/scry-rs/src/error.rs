@@ -5,6 +5,8 @@ use std::fmt;
 #[derive(Debug, Clone, PartialEq)]
 pub enum Error {
     NoSuchRoot(String),
+    /// A short root name (`APP`) matches more than one full one (`a::APP`, `b::APP`).
+    AmbiguousRoot { name: String, candidates: Vec<String> },
     NoSuchMember { type_name: &'static str, member: String },
     IndexOutOfRange { len: usize, index: usize },
     /// The path continues past a value that has no children (a scalar or an opaque value).
@@ -23,6 +25,7 @@ impl Error {
     pub fn code(&self) -> &'static str {
         match self {
             Error::NoSuchRoot(_) => "no_such_root",
+            Error::AmbiguousRoot { .. } => "ambiguous_root",
             Error::NoSuchMember { .. } => "no_such_member",
             Error::IndexOutOfRange { .. } => "index_out_of_range",
             Error::NotNavigable { .. } => "not_navigable",
@@ -55,6 +58,9 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Error::NoSuchRoot(name) => write!(f, "no root named '{name}'"),
+            Error::AmbiguousRoot { name, candidates } => {
+                write!(f, "'{name}' matches several roots: {}", candidates.join(", "))
+            }
             Error::NoSuchMember { type_name, member } => write!(f, "{type_name} has no member '{member}'"),
             Error::IndexOutOfRange { len, index } => write!(f, "index {index} is out of range (length {len})"),
             Error::NotNavigable { type_name } => write!(f, "{type_name} has no members to navigate into"),

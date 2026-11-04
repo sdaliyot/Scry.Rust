@@ -1,15 +1,13 @@
 //! Price rules, held by the app as `Box<dyn PriceRule>`: the trait-object case, where a registry
 //! sees the trait and has to discover the concrete type behind each entry.
 
-use crate::MaybeReflect;
 use crate::inventory::{Category, Item};
 
-pub trait PriceRule: MaybeReflect {
+pub trait PriceRule {
     fn name(&self) -> &str;
     fn apply(&self, price_cents: i64, item: &Item) -> i64;
 }
 
-#[cfg_attr(feature = "scry", derive(scry::Reflect))]
 pub struct Discount {
     label: String,
     percent: u8,
@@ -31,7 +29,6 @@ impl PriceRule for Discount {
     }
 }
 
-#[cfg_attr(feature = "scry", derive(scry::Reflect))]
 pub struct CategoryMarkup {
     category: Category,
     percent: u8,

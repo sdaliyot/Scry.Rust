@@ -6,7 +6,7 @@ publish.workspace = true
 
 [features]
 # Builds the Scry.Rust registry into the app. Off by default: a normal build carries none of it.
-scry = ["dep:scry", "tokio/sync"]
+scry = ["dep:scry"]
 
 [dependencies]
 dioxus = { version = "0.7", features = ["desktop"] }

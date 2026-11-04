@@ -4,7 +4,6 @@
 use crate::util::Describe;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(feature = "scry", derive(scry::Reflect))]
 pub enum Category {
     Tools,
     Parts,
@@ -12,7 +11,6 @@ pub enum Category {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "scry", derive(scry::Reflect))]
 pub struct Item {
     pub id: u32,
     pub name: String,
@@ -34,7 +32,6 @@ impl Describe for Item {
     }
 }
 
-#[cfg_attr(feature = "scry", derive(scry::Reflect))]
 pub struct Inventory {
     items: Vec<Item>,
     next_id: u32,

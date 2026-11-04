@@ -13,12 +13,19 @@ name = "scry"
 [features]
 # Reflect impls for Dioxus signals. They are owned by the UI thread, so a registry that holds them
 # has to be driven from that thread too.
-dioxus = ["dep:dioxus-signals"]
+dioxus = ["dep:dioxus-signals", "dep:dioxus-core", "dep:futures-channel", "dep:futures-util"]
 
 [dependencies]
 scry-rs-derive = { path = "../scry-rs-derive" }
 serde_json.workspace = true
+# Gathers the registrations the generator emits next to each static, across all crates.
+linkme = "0.3"
+# The endpoint's capability token.
+getrandom = "0.3"
 dioxus-signals = { version = "0.7", optional = true }
+dioxus-core = { version = "0.7", optional = true }
+futures-channel = { version = "0.3", optional = true }
+futures-util = { version = "0.3", optional = true, default-features = false }
 
 [dev-dependencies]
 serde_json.workspace = true

@@ -6,7 +6,7 @@
 
 use std::any::type_name;
 
-use dioxus_signals::{GlobalSignal, ReadableExt, Signal, WritableExt};
+use dioxus_signals::{GlobalSignal, Memo, ReadableExt, Signal, WritableExt};
 use serde_json::Value;
 
 use crate::{Error, Kind, Member, Reflect, Segment, Visit, VisitMut};
@@ -49,6 +49,41 @@ impl<T: Reflect + 'static> Reflect for Signal<T> {
 
     fn assign(&mut self, value: &Value) -> Result<(), Error> {
         self.write_shared(&[], &mut |target| target.assign(value))
+    }
+}
+
+/// Read-only: a memo's value is recomputed from its inputs, so writing it would not stick.
+impl<T: Reflect + PartialEq + 'static> Reflect for Memo<T> {
+    fn type_name(&self) -> &'static str {
+        type_name::<Self>()
+    }
+
+    fn kind(&self) -> Kind {
+        self.try_read().map_or(Kind::Opaque, |value| value.kind())
+    }
+
+    fn members(&self) -> Vec<Member> {
+        self.try_read().map(|value| value.members()).unwrap_or_default()
+    }
+
+    fn snapshot(&self, depth: usize) -> Value {
+        match self.try_read() {
+            Ok(value) => value.snapshot(depth),
+            Err(_) => Value::String(format!("<borrowed: {}>", self.type_name())),
+        }
+    }
+
+    fn read(&self, path: &[Segment], visit: Visit<'_>) -> Result<(), Error> {
+        let value = self.try_read().map_err(|_| Error::LockBusy { type_name: self.type_name() })?;
+        value.read(path, visit)
+    }
+
+    fn write(&mut self, _path: &[Segment], _visit: VisitMut<'_>) -> Result<(), Error> {
+        Err(Error::not_writable("a memo is derived from other state; change its inputs instead"))
+    }
+
+    fn write_shared(&self, _path: &[Segment], _visit: VisitMut<'_>) -> Result<(), Error> {
+        Err(Error::not_writable("a memo is derived from other state; change its inputs instead"))
     }
 }
 

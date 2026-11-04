@@ -1,0 +1,18 @@
+[package]
+name = "scry-rs-cargo"
+description = "cargo scry: builds a crate with a Scry.Rust registry generated for all of its code."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "cargo-scry"
+path = "src/main.rs"
+
+[dependencies]
+serde_json.workspace = true
+syn = { version = "2", features = ["full", "visit"] }
+quote = "1"
+# Line and column positions for parsed tokens, so edits can be placed in the original text.
+proc-macro2 = { version = "1", features = ["span-locations"] }

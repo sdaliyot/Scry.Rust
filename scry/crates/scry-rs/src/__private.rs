@@ -20,7 +20,11 @@ use std::fmt::Debug;
 pub use serde_json::Map;
 use serde_json::Value;
 
-use crate::{Error, Kind, Reflect, Segment, Visit, VisitMut};
+use crate::{Error, Kind, Reflect, Registry, Segment, Visit, VisitMut};
+
+#[cfg(feature = "dioxus")]
+pub use crate::dioxus_hooks as dioxus;
+pub use crate::endpoint::start as start_endpoint;
 
 /// Maximum length of a `Debug` rendering in a snapshot, so one large opaque value cannot swamp it.
 const MAX_DEBUG_LEN: usize = 1_000;
@@ -91,6 +95,96 @@ impl<'a, T> ViaOtherMut<'a> for &ProbeMut<'a, T> {
     }
 }
 
+/// The owning counterpart of [`Probe`], for handles such as signals that a registry keeps a copy
+/// of: a navigable clone, a `Debug`-only clone, or just the type name.
+pub struct ProbeOwned<'a, T>(pub &'a T);
+
+pub trait ViaReflectOwned {
+    fn scry_owned(&self) -> Box<dyn Reflect>;
+}
+
+impl<T: Reflect + Clone + 'static> ViaReflectOwned for &&ProbeOwned<'_, T> {
+    fn scry_owned(&self) -> Box<dyn Reflect> {
+        Box::new(self.0.clone())
+    }
+}
+
+pub trait ViaDebugOwned {
+    fn scry_owned(&self) -> Box<dyn Reflect>;
+}
+
+impl<T: Debug + Clone + 'static> ViaDebugOwned for &ProbeOwned<'_, T> {
+    fn scry_owned(&self) -> Box<dyn Reflect> {
+        Box::new(DebugOwned { value: Box::new(self.0.clone()), type_name: type_name::<T>() })
+    }
+}
+
+pub trait ViaOpaqueOwned {
+    fn scry_owned(&self) -> Box<dyn Reflect>;
+}
+
+impl<T> ViaOpaqueOwned for ProbeOwned<'_, T> {
+    fn scry_owned(&self) -> Box<dyn Reflect> {
+        Box::new(OpaqueValue { type_name: type_name::<T>() })
+    }
+}
+
+/// Registers one `static` with a registry. The generator emits one per static, next to it, into
+/// [`STATICS`]; the linker gathers them from every crate into one list.
+pub type StaticEntry = fn(&mut Registry);
+
+#[linkme::distributed_slice]
+pub static STATICS: [StaticEntry];
+
+pub use linkme;
+
+/// `impl Reflect for dyn Trait`, emitted by the generator for each trait it can make object-safe
+/// reflection for. Every call goes through the hidden `__scry_ref`/`__scry_mut` methods the
+/// generator adds to the trait, which each implementing type overrides with its own probe, so a
+/// `Box<dyn Trait>` reflects the concrete value behind it.
+#[macro_export]
+#[doc(hidden)]
+macro_rules! __reflect_dyn {
+    ([$($generics:tt)*] [$($trait_path:tt)*] [$($self_ty:tt)*] [$($where:tt)*]) => {
+        #[automatically_derived]
+        impl<$($generics)*> $crate::Reflect for $($self_ty)* where $($where)* {
+            fn type_name(&self) -> &'static str {
+                <Self as $($trait_path)*>::__scry_ref(self).get().type_name()
+            }
+
+            fn kind(&self) -> $crate::Kind {
+                <Self as $($trait_path)*>::__scry_ref(self).get().kind()
+            }
+
+            fn members(&self) -> ::std::vec::Vec<$crate::Member> {
+                <Self as $($trait_path)*>::__scry_ref(self).get().members()
+            }
+
+            fn snapshot(&self, depth: usize) -> $crate::Value {
+                <Self as $($trait_path)*>::__scry_ref(self).snapshot(depth)
+            }
+
+            fn read(&self, path: &[$crate::Segment], visit: $crate::Visit<'_>) -> ::core::result::Result<(), $crate::Error> {
+                <Self as $($trait_path)*>::__scry_ref(self).read(path, visit)
+            }
+
+            fn write(&mut self, path: &[$crate::Segment], visit: $crate::VisitMut<'_>) -> ::core::result::Result<(), $crate::Error> {
+                <Self as $($trait_path)*>::__scry_mut(self).write(path, visit)
+            }
+
+            fn write_shared(&self, path: &[$crate::Segment], visit: $crate::VisitMut<'_>) -> ::core::result::Result<(), $crate::Error> {
+                <Self as $($trait_path)*>::__scry_ref(self).write_shared(path, visit)
+            }
+
+            fn assign(&mut self, value: &$crate::Value) -> ::core::result::Result<(), $crate::Error> {
+                <Self as $($trait_path)*>::__scry_mut(self).assign(value)
+            }
+        }
+    };
+}
+
+pub use crate::__reflect_dyn as reflect_dyn;
+
 /// A field viewed for reading, through whatever its type supports.
 pub enum FieldRef<'a> {
     Reflect(&'a dyn Reflect),
@@ -99,6 +193,19 @@ pub enum FieldRef<'a> {
 }
 
 impl FieldRef<'_> {
+    /// What a trait method's default body reports for a type the generator never saw.
+    pub fn opaque(type_name: &'static str) -> Self {
+        FieldRef::Opaque(OpaqueValue { type_name })
+    }
+
+    pub fn get(&self) -> &dyn Reflect {
+        match self {
+            FieldRef::Reflect(value) => *value,
+            FieldRef::Debug(value) => value,
+            FieldRef::Opaque(value) => value,
+        }
+    }
+
     pub fn snapshot(&self, depth: usize) -> Value {
         match self {
             FieldRef::Reflect(value) => value.snapshot(depth),
@@ -169,6 +276,34 @@ impl Reflect for DebugValue<'_> {
             text.push('…');
         }
         Value::String(text)
+    }
+
+    fn read(&self, path: &[Segment], visit: Visit<'_>) -> Result<(), Error> {
+        if path.is_empty() { visit(self) } else { Err(Error::NotNavigable { type_name: self.type_name }) }
+    }
+
+    fn write(&mut self, _path: &[Segment], _visit: VisitMut<'_>) -> Result<(), Error> {
+        Err(does_not_reflect(self.type_name))
+    }
+}
+
+/// An owned copy of a value shown through its `Debug` output.
+struct DebugOwned {
+    value: Box<dyn Debug>,
+    type_name: &'static str,
+}
+
+impl Reflect for DebugOwned {
+    fn type_name(&self) -> &'static str {
+        self.type_name
+    }
+
+    fn kind(&self) -> Kind {
+        Kind::Opaque
+    }
+
+    fn snapshot(&self, depth: usize) -> Value {
+        DebugValue { value: &*self.value, type_name: self.type_name }.snapshot(depth)
     }
 
     fn read(&self, path: &[Segment], visit: Visit<'_>) -> Result<(), Error> {

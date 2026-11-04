@@ -37,8 +37,10 @@ fn run(registry: &Registry, line: &str) -> Result<Value, Error> {
             let (path, json) = rest
                 .split_once(char::is_whitespace)
                 .ok_or_else(|| Error::BadCommand("usage: set <path> <json>".into()))?;
-            let value: Value =
-                serde_json::from_str(json.trim()).map_err(|error| Error::BadCommand(format!("invalid JSON value: {error}")))?;
+            // Text that is not JSON is taken as a string, so `set FILTER Done` works without the
+            // quotes that shells - Windows PowerShell especially - tend to strip.
+            let json = json.trim();
+            let value: Value = serde_json::from_str(json).unwrap_or_else(|_| Value::String(json.to_owned()));
             registry.set(path, &value)?;
             registry.get(path, DEFAULT_DEPTH)
         }

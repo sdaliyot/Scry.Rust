@@ -1,10 +1,15 @@
 //! Scry.Rust: inspect and change the state of a running Rust process.
 //!
 //! A [`Registry`] holds named roots - statics, shared app state, UI signals - and resolves paths
-//! such as `app.inventory.items[2].qty` against them through the [`Reflect`] trait. Types opt in
-//! with `#[derive(Reflect)]`; fields whose types do not implement it still show up, through their
-//! `Debug` output or as an opaque type name, so one derive never fails because of a third-party
-//! field.
+//! such as `APP.inventory.items[2].qty` against them through the [`Reflect`] trait. Fields whose
+//! types do not implement it still show up, through their `Debug` output or as an opaque type
+//! name, so reflecting a type never fails because of a third-party field.
+//!
+//! An app normally never mentions this crate in its code. It declares an optional dependency and
+//! a `scry` feature, and is built with `cargo scry` (the `scry-rs-cargo` crate), which compiles a
+//! rewritten copy of its sources: `#[derive(Reflect)]` on every type, a registration for every
+//! static, reflection for trait objects and Dioxus hooks, and an [`endpoint`] started from `main`
+//! for the `scry` CLI. The derive and [`Registry`] can also be used by hand.
 //!
 //! Two rules shape the API, both forced by Rust rather than chosen:
 //!
@@ -17,12 +22,16 @@
 //!   written through an aliased reference, which would be undefined behavior.
 
 mod command;
+pub mod endpoint;
 mod error;
 mod impls;
 mod path;
 mod reflect;
 mod registry;
 
+#[cfg(feature = "dioxus")]
+#[doc(hidden)]
+pub mod dioxus_hooks;
 #[cfg(feature = "dioxus")]
 mod dioxus_impls;
 

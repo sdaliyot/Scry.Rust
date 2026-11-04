@@ -6,7 +6,7 @@ use std::fmt::Display;
 use std::sync::atomic::{
     AtomicBool, AtomicI32, AtomicI64, AtomicIsize, AtomicU32, AtomicU64, AtomicUsize, Ordering,
 };
-use std::sync::{Arc, Mutex, OnceLock, RwLock, TryLockError, TryLockResult};
+use std::sync::{Arc, LazyLock, Mutex, OnceLock, RwLock, TryLockError, TryLockResult};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -171,8 +171,8 @@ impl Reflect for String {
     }
 }
 
-/// Readable only: a `&'static str` field cannot be pointed at a string created at runtime.
-impl Reflect for &'static str {
+/// Readable only: a `&str` field cannot be pointed at a string created at runtime.
+impl Reflect for &str {
     fn type_name(&self) -> &'static str {
         "&str"
     }
@@ -612,6 +612,112 @@ impl<T: Reflect + ?Sized> Reflect for Arc<T> {
 
     fn assign(&mut self, value: &Value) -> Result<(), Error> {
         (**self).write_shared(&[], &mut |inner| inner.assign(value))
+    }
+}
+
+/// Transparent, shared like an `Arc`: a write continues below only through interior mutability.
+impl<T: Reflect + ?Sized> Reflect for &T {
+    fn type_name(&self) -> &'static str {
+        (**self).type_name()
+    }
+
+    fn kind(&self) -> Kind {
+        (**self).kind()
+    }
+
+    fn members(&self) -> Vec<Member> {
+        (**self).members()
+    }
+
+    fn snapshot(&self, depth: usize) -> Value {
+        (**self).snapshot(depth)
+    }
+
+    fn read(&self, path: &[Segment], visit: Visit<'_>) -> Result<(), Error> {
+        (**self).read(path, visit)
+    }
+
+    fn write(&mut self, path: &[Segment], visit: VisitMut<'_>) -> Result<(), Error> {
+        (**self).write_shared(path, visit)
+    }
+
+    fn write_shared(&self, path: &[Segment], visit: VisitMut<'_>) -> Result<(), Error> {
+        (**self).write_shared(path, visit)
+    }
+
+    fn assign(&mut self, value: &Value) -> Result<(), Error> {
+        (**self).write_shared(&[], &mut |inner| inner.assign(value))
+    }
+}
+
+/// Fully transparent, like a `Box`.
+impl<T: Reflect + ?Sized> Reflect for &mut T {
+    fn type_name(&self) -> &'static str {
+        (**self).type_name()
+    }
+
+    fn kind(&self) -> Kind {
+        (**self).kind()
+    }
+
+    fn members(&self) -> Vec<Member> {
+        (**self).members()
+    }
+
+    fn snapshot(&self, depth: usize) -> Value {
+        (**self).snapshot(depth)
+    }
+
+    fn read(&self, path: &[Segment], visit: Visit<'_>) -> Result<(), Error> {
+        (**self).read(path, visit)
+    }
+
+    fn write(&mut self, path: &[Segment], visit: VisitMut<'_>) -> Result<(), Error> {
+        (**self).write(path, visit)
+    }
+
+    fn write_shared(&self, path: &[Segment], visit: VisitMut<'_>) -> Result<(), Error> {
+        (**self).write_shared(path, visit)
+    }
+
+    fn assign(&mut self, value: &Value) -> Result<(), Error> {
+        (**self).assign(value)
+    }
+}
+
+/// Transparent, shared like an `Arc`. Reading a `LazyLock` that has not run yet runs it, exactly
+/// as the app's own first access would.
+impl<T: Reflect, F: FnOnce() -> T> Reflect for LazyLock<T, F> {
+    fn type_name(&self) -> &'static str {
+        LazyLock::force(self).type_name()
+    }
+
+    fn kind(&self) -> Kind {
+        LazyLock::force(self).kind()
+    }
+
+    fn members(&self) -> Vec<Member> {
+        LazyLock::force(self).members()
+    }
+
+    fn snapshot(&self, depth: usize) -> Value {
+        LazyLock::force(self).snapshot(depth)
+    }
+
+    fn read(&self, path: &[Segment], visit: Visit<'_>) -> Result<(), Error> {
+        LazyLock::force(self).read(path, visit)
+    }
+
+    fn write(&mut self, path: &[Segment], visit: VisitMut<'_>) -> Result<(), Error> {
+        LazyLock::force(self).write_shared(path, visit)
+    }
+
+    fn write_shared(&self, path: &[Segment], visit: VisitMut<'_>) -> Result<(), Error> {
+        LazyLock::force(self).write_shared(path, visit)
+    }
+
+    fn assign(&mut self, value: &Value) -> Result<(), Error> {
+        LazyLock::force(self).write_shared(&[], &mut |inner| inner.assign(value))
     }
 }
 

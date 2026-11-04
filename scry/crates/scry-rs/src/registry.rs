@@ -1,5 +1,6 @@
 use serde_json::{Map, Value, json};
 
+use crate::__private::FieldRef;
 use crate::path::parse;
 use crate::{Error, Member, Reflect, Segment};
 
@@ -15,6 +16,8 @@ pub struct Registry {
 enum Root {
     Owned(Box<dyn Reflect>),
     Static(&'static dyn Reflect),
+    /// A generated static, whose type may not implement `Reflect` at all.
+    Field(FieldRef<'static>),
 }
 
 impl Root {
@@ -22,6 +25,7 @@ impl Root {
         match self {
             Root::Owned(value) => value.as_ref(),
             Root::Static(value) => *value,
+            Root::Field(value) => value.get(),
         }
     }
 }
@@ -29,6 +33,28 @@ impl Root {
 impl Registry {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A registry holding every root the scry generator found: each `static` in the crates it
+    /// rewrote, named by its full path (`console_demo::APP`), and with the `dioxus` feature the
+    /// signals of mounted components under `ui`. Paths may use a static's short name when it is
+    /// unique (`APP.inventory`).
+    ///
+    /// Without the generator - a plain `--features scry` build - this is just an empty registry.
+    pub fn discovered() -> Self {
+        let mut registry = Self::new();
+        for register in crate::__private::STATICS {
+            register(&mut registry);
+        }
+        registry.roots.sort_by(|(a, _), (b, _)| a.cmp(b));
+        #[cfg(feature = "dioxus")]
+        registry.add("ui", crate::dioxus_hooks::Ui);
+        registry
+    }
+
+    #[doc(hidden)]
+    pub fn __add_field(&mut self, name: &str, root: FieldRef<'static>) {
+        self.insert(name.to_owned(), Root::Field(root));
     }
 
     /// Adds a root the registry owns: an `Arc` to shared state, a signal handle. Replaces any
@@ -54,8 +80,24 @@ impl Registry {
 
     fn resolve(&self, path: &str) -> Result<(&dyn Reflect, Vec<Segment>), Error> {
         let (root, segments) = parse(path)?;
-        let (_, value) = self.roots.iter().find(|(name, _)| *name == root).ok_or(Error::NoSuchRoot(root))?;
-        Ok((value.get(), segments))
+        Ok((self.find(&root)?.get(), segments))
+    }
+
+    /// An exact root name, or the unique one ending in `::name`.
+    fn find(&self, root: &str) -> Result<&Root, Error> {
+        if let Some((_, value)) = self.roots.iter().find(|(name, _)| name == root) {
+            return Ok(value);
+        }
+        let suffix = format!("::{root}");
+        let matches: Vec<&(String, Root)> = self.roots.iter().filter(|(name, _)| name.ends_with(&suffix)).collect();
+        match matches.as_slice() {
+            [(_, value)] => Ok(value),
+            [] => Err(Error::NoSuchRoot(root.to_owned())),
+            _ => Err(Error::AmbiguousRoot {
+                name: root.to_owned(),
+                candidates: matches.iter().map(|(name, _)| name.clone()).collect(),
+            }),
+        }
     }
 
     /// A JSON snapshot of the value at `path`, `depth` levels deep.
