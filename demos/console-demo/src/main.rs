@@ -7,6 +7,8 @@
 
 mod inventory;
 mod pricing;
+#[cfg(feature = "scry")]
+mod scry_wiring;
 mod util;
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -24,6 +26,19 @@ static APP: OnceLock<Arc<AppState>> = OnceLock::new();
 /// A plain static flag the worker reads on every sale - the simplest thing to flip from outside.
 static DISCOUNTS_ENABLED: AtomicBool = AtomicBool::new(true);
 
+/// A supertrait for traits whose objects the registry should see into. With the `scry` feature it
+/// is `scry::Reflect`, so a `Box<dyn PriceRule>` is navigable and reports its concrete type;
+/// without it, it is a bound every type meets.
+#[cfg(feature = "scry")]
+pub use scry::Reflect as MaybeReflect;
+
+#[cfg(not(feature = "scry"))]
+pub trait MaybeReflect {}
+
+#[cfg(not(feature = "scry"))]
+impl<T: ?Sized> MaybeReflect for T {}
+
+#[cfg_attr(feature = "scry", derive(scry::Reflect))]
 pub struct AppState {
     inventory: RwLock<Inventory>,
     stats: Mutex<Stats>,
@@ -48,6 +63,7 @@ impl AppState {
 }
 
 #[derive(Debug, Default)]
+#[cfg_attr(feature = "scry", derive(scry::Reflect))]
 struct Stats {
     ticks: u64,
     sold: u64,
@@ -69,6 +85,8 @@ impl Describe for Stats {
 fn main() {
     let state = APP.get_or_init(|| Arc::new(AppState::new()));
     println!("console-demo running, pid {}. Ctrl+C to stop.", std::process::id());
+    #[cfg(feature = "scry")]
+    scry_wiring::start();
 
     let worker_state = Arc::clone(state);
     thread::spawn(move || worker_loop(&worker_state));

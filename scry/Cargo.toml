@@ -1,0 +1,14 @@
+# The Scry.Rust library. A separate workspace from ../demos, which depend on it by path.
+[workspace]
+resolver = "3"
+members = ["crates/scry-rs", "crates/scry-rs-derive"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+# Published names are scry-rs and scry-rs-derive ("scry" is taken on crates.io). Not published yet.
+publish = false
+
+[workspace.dependencies]
+serde_json = "1"

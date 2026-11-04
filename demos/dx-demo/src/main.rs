@@ -7,6 +7,8 @@
 //! marshal onto it to read or write them - the Rust equivalent of Scry.NET's WPF/WinForms adapters.
 
 mod model;
+#[cfg(feature = "scry")]
+mod scry_wiring;
 
 use std::time::Duration;
 
@@ -17,6 +19,7 @@ use model::{Board, Priority};
 static FILTER: GlobalSignal<Filter> = Signal::global(|| Filter::All);
 
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "scry", derive(scry::Reflect))]
 enum Filter {
     All,
     Open,
@@ -49,6 +52,9 @@ fn App() -> Element {
             uptime += 1;
         }
     });
+
+    #[cfg(feature = "scry")]
+    scry_wiring::use_scry(board, uptime);
 
     let pid = std::process::id();
     let summary = board.read().summary();

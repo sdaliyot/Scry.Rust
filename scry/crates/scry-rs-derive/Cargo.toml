@@ -1,0 +1,15 @@
+[package]
+name = "scry-rs-derive"
+description = "#[derive(Reflect)] for Scry.Rust."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1"
+quote = "1"
+syn = "2"

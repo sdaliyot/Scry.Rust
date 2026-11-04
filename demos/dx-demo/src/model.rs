@@ -2,6 +2,7 @@
 //! has to reach them through the signal and through code emitted next to the types.
 
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "scry", derive(scry::Reflect))]
 pub enum Priority {
     Low,
     Normal,
@@ -9,6 +10,7 @@ pub enum Priority {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "scry", derive(scry::Reflect))]
 pub struct Task {
     pub id: u32,
     pub title: String,
@@ -16,6 +18,7 @@ pub struct Task {
     pub priority: Priority,
 }
 
+#[cfg_attr(feature = "scry", derive(scry::Reflect))]
 pub struct Board {
     tasks: Vec<Task>,
     next_id: u32,

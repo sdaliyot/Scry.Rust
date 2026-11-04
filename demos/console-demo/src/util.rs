@@ -23,6 +23,7 @@ pub fn clamp_all<T: PartialOrd + Copy>(values: &mut [T], low: T, high: T) {
 }
 
 /// A tiny fixed-capacity cache, used as `Cache<u32, String>`.
+#[cfg_attr(feature = "scry", derive(scry::Reflect))]
 pub struct Cache<K, V> {
     entries: Vec<(K, V)>,
     capacity: usize,

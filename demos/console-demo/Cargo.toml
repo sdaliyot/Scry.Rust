@@ -4,4 +4,9 @@ version = "0.1.0"
 edition.workspace = true
 publish.workspace = true
 
+[features]
+# Builds the Scry.Rust registry into the app. Off by default: a normal build carries none of it.
+scry = ["dep:scry"]
+
 [dependencies]
+scry = { package = "scry-rs", path = "../../scry/crates/scry-rs", optional = true }
