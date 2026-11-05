@@ -4,14 +4,19 @@ use crate::{Error, Registry};
 
 pub(crate) const DEFAULT_DEPTH: usize = 3;
 
-const HELP: &str = "roots | ls <path> | get <path> [depth] | set <path> <json> | eval <rhai script> | help";
+/// How deep a function's result is snapshotted: results are usually small, and often the point.
+pub(crate) const RESULT_DEPTH: usize = 8;
+
+const HELP: &str = "roots | ls <path> | get <path> [depth] | set <path> <json> | call <function or path.method> [json args]                     | fns [filter] | eval <rhai script> | help";
 
 /// Runs one text command against `registry` and returns a JSON reply:
 /// `{"ok":true,"result":...}` or `{"ok":false,"error":{"code":...,"message":...}}`, plus an
 /// `"output"` array with whatever a script printed.
 ///
 /// Commands: `roots`, `ls <path>`, `get <path> [depth]` (default depth 3), `set <path> <json>`,
-/// and with the `script` feature `eval <rhai script>` (see the `script` module docs).
+/// `call <target> [args]` (see [`Registry::call`]; arguments are JSON values separated by
+/// spaces), `fns [filter]`, and with the `script` feature `eval <rhai script>` (see the `script`
+/// module docs).
 pub fn execute(registry: &Registry, line: &str) -> Value {
     let mut output = Vec::new();
     let mut reply = match run(registry, line.trim(), &mut output) {
@@ -50,6 +55,11 @@ fn run(registry: &Registry, line: &str, output: &mut Vec<String>) -> Result<Valu
             registry.set(path, &value)?;
             registry.get(path, DEFAULT_DEPTH)
         }
+        "call" => {
+            let (target, args) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
+            registry.call(required(target, "a function or method")?, &arguments(args), RESULT_DEPTH)
+        }
+        "fns" => Ok(crate::call::list(rest)),
         #[cfg(feature = "script")]
         "eval" => crate::script::evaluate(registry, required(rest, "a script")?, DEFAULT_DEPTH, output),
         #[cfg(not(feature = "script"))]
@@ -60,6 +70,15 @@ fn run(registry: &Registry, line: &str, output: &mut Vec<String>) -> Result<Valu
         "help" | "" => Ok(Value::String(HELP.into())),
         other => Err(Error::BadCommand(format!("unknown command '{other}'; {HELP}"))),
     }
+}
+
+/// JSON values separated by whitespace. Text that does not parse as JSON is split on whitespace
+/// instead, and each word that is not JSON taken as a string, as `set` does.
+fn arguments(text: &str) -> Vec<Value> {
+    let parsed: Result<Vec<Value>, _> = serde_json::Deserializer::from_str(text).into_iter::<Value>().collect();
+    parsed.unwrap_or_else(|_| {
+        text.split_whitespace().map(|word| serde_json::from_str(word).unwrap_or_else(|_| Value::String(word.to_owned()))).collect()
+    })
 }
 
 fn required<'a>(text: &'a str, what: &str) -> Result<&'a str, Error> {

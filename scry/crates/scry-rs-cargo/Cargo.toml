@@ -12,7 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 serde_json.workspace = true
-syn = { version = "2", features = ["full", "visit"] }
+syn = { version = "2", features = ["full", "visit", "visit-mut"] }
 quote = "1"
 # Line and column positions for parsed tokens, so edits can be placed in the original text.
 proc-macro2 = { version = "1", features = ["span-locations"] }

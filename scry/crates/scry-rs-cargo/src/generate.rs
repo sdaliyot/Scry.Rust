@@ -9,6 +9,8 @@
 //!   reflects the concrete value inside.
 //! - **Statics**: a registration next to each non-`mut` static, which `Registry::discovered`
 //!   collects at runtime.
+//! - **Functions**: a call shim next to each module-level function and each method of a
+//!   module-level `impl`; see [`crate::functions`] for which ones qualify.
 //! - **Dioxus hooks** (crates that depend on `dioxus`): `let x = use_signal(..)` and the other
 //!   state hooks also record their handle under the component's name; see `scry::dioxus_hooks`.
 //! - **Endpoint** (executables): started at the top of `main`; in a Dioxus app the components
@@ -28,6 +30,7 @@ use syn::{
 };
 
 use crate::edits::{Edits, Source};
+use crate::functions::{self, Callee};
 use crate::tokens;
 
 /// Hooks whose result is a state handle worth tracking.
@@ -156,6 +159,9 @@ impl<'ast> Visit<'ast> for Generator<'_> {
     }
 
     fn visit_item_impl(&mut self, item: &'ast ItemImpl) {
+        if self.fns.is_empty() {
+            self.impl_shims(item);
+        }
         if let Some((None, path, _)) = &item.trait_ {
             let trait_name = path.segments.last().map(|segment| segment.ident.to_string()).unwrap_or_default();
             if self.cx.dyn_traits.contains(&trait_name) {
@@ -188,6 +194,18 @@ impl<'ast> Visit<'ast> for Generator<'_> {
 
     fn visit_item_fn(&mut self, item: &'ast ItemFn) {
         self.start_endpoint(item);
+        if self.fns.is_empty() {
+            let name = item.sig.ident.to_string();
+            let callee = Callee { self_ty: None, trait_path: None, cfgs: functions::cfgs(&item.attrs) };
+            match functions::shim(self.source, &item.attrs, &item.sig, &callee) {
+                Ok(shim) => {
+                    self.edits.insert(self.source.end(item.block.brace_token.span.close()), shim);
+                    self.report.generated("fn", &name);
+                }
+                Err(reason) if name == "main" => drop(reason),
+                Err(reason) => self.report.skipped("fn", &name, &reason),
+            }
+        }
         self.fns.push(item.sig.ident.to_string());
         visit::visit_item_fn(self, item);
         self.fns.pop();
@@ -235,6 +253,50 @@ impl<'ast> Visit<'ast> for Generator<'_> {
 }
 
 impl Generator<'_> {
+    /// Shims for the functions of a module-level `impl` block, all placed after its closing brace.
+    fn impl_shims(&mut self, item: &ItemImpl) {
+        let self_name = functions::compact(&item.self_ty);
+        let trait_path = match &item.trait_ {
+            Some((Some(_), _, _)) => return,
+            Some((None, path, _)) => Some(path),
+            None => None,
+        };
+        let label = match trait_path {
+            Some(path) => format!("{} for {self_name}", functions::compact(path)),
+            None => self_name.clone(),
+        };
+        let reason = functions::impl_skip_reason(&item.generics, &item.self_ty)
+            .map(str::to_owned)
+            .or_else(|| item.unsafety.map(|_| "it is an unsafe impl".to_owned()))
+            .or_else(|| functions::unknown_attribute(&item.attrs).map(|attribute| format!("its #[{attribute}] attribute may rewrite it")));
+        if let Some(reason) = reason {
+            if item.items.iter().any(|item| matches!(item, syn::ImplItem::Fn(_))) {
+                self.report.skipped("impl", &label, &format!("methods not callable: {reason}"));
+            }
+            return;
+        }
+        let mut shims = String::new();
+        for impl_item in &item.items {
+            let syn::ImplItem::Fn(method) = impl_item else { continue };
+            let name = format!("{self_name}::{}", method.sig.ident);
+            let callee = Callee {
+                self_ty: Some(&item.self_ty),
+                trait_path,
+                cfgs: functions::cfgs(item.attrs.iter().chain(&method.attrs)),
+            };
+            match functions::shim(self.source, &method.attrs, &method.sig, &callee) {
+                Ok(shim) => {
+                    shims.push_str(&shim);
+                    self.report.generated("method", &name);
+                }
+                Err(reason) => self.report.skipped("method", &name, &reason),
+            }
+        }
+        if !shims.is_empty() {
+            self.edits.insert(self.source.end(item.brace_token.span.close()), shims);
+        }
+    }
+
     fn track_hook(&mut self, local: &Local) {
         let Some(init) = &local.init else { return };
         if init.diverge.is_some() {
@@ -719,5 +781,55 @@ mod tests {
         assert!(report.contains("hook App.count (use_signal)"));
         assert_eq!(report.matches("hook").count(), 1);
         assert_eq!(rewrite(text, false).0, text);
+    }
+
+    #[test]
+    fn emits_call_shims_for_callable_functions_only() {
+        let text = "fn add(a: i64, b: &str) -> i64 { a }
+#[cfg(windows)] fn only_windows() {}
+fn generic<T>(t: T) {}
+async fn later() {}
+fn takes_mut(v: &mut Vec<u8>) {}
+fn takes_impl(v: impl Fn()) {}
+#[component] fn card() {}
+fn App() {}
+#[tokio::main] fn wrapped() {}
+fn main() { fn inner() {} }
+struct S;
+impl S { fn get(&self, key: &'static str) -> u8 { 0 } fn bump(&mut self) {} fn new() -> Self { S } fn eat(self) {} fn same(&self, other: &Self) {} }
+impl<T> Wrap<T> { fn unwrap(&self) {} }
+impl Default for S { fn default() -> Self { S } }
+";
+        let (out, report) = rewrite(text, false);
+        for callable in ["fn add", "fn only_windows", "method S::get", "method S::bump", "method S::new", "method S::eat", "method S::same", "method S::default"] {
+            assert!(report.contains(&format!("+ {callable}")), "{callable} missing:
+{report}");
+        }
+        for (skipped, reason) in [
+            ("fn generic", "it is generic"),
+            ("fn later", "it is async"),
+            ("fn takes_mut", "`&mut` argument"),
+            ("fn takes_impl", "`impl Trait` argument"),
+            ("fn card", "UI component"),
+            ("fn App", "UI component"),
+            ("fn wrapped", "#[tokio::main] attribute"),
+            ("impl Wrap<T>", "the impl is generic"),
+        ] {
+            assert!(report.lines().any(|line| line.contains(skipped) && line.contains(reason)), "{skipped}:
+{report}");
+        }
+        assert!(!report.contains("fn main") && !report.contains("inner"), "{report}");
+
+        let shim = |name: &str| out.lines().find(|line| line.contains(&format!("fn {name}"))).unwrap().to_owned();
+        assert!(shim("only_windows").contains("} # [cfg (windows)] # [:: scry"), "{}", shim("only_windows"));
+        let add = shim("add");
+        assert!(add.contains("ArgProbe :: < i64 >") && add.contains("RefProbe :: < str >"), "{add}");
+        assert!(add.contains("signature : \"fn add(a: i64, b: &str) -> i64\""), "{add}");
+        let methods = shim("get");
+        assert!(shim("default").contains("< S as Default > :: default"), "{}", shim("default"));
+        assert!(methods.contains("RefProbe :: < S >"), "Self is spelled as the impl type: {methods}");
+        assert!(methods.contains("RefProbe :: < str >"), "a named lifetime is dropped: {methods}");
+        assert!(methods.contains("SelfProbe (this)"), "{methods}");
+        assert!(methods.contains("Receiver :: Mut"), "{methods}");
     }
 }

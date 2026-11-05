@@ -18,6 +18,7 @@
 //! rebuild the dependencies each time.
 
 mod edits;
+mod functions;
 mod generate;
 mod rewrite;
 mod tokens;

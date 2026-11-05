@@ -17,12 +17,20 @@
 //! script starts, and if the script assigns it (`FILTER = "Done"`) the value is written back when
 //! the script finishes without an error. Nodes have methods that never clash with field names, because fields are reached
 //! as properties and methods are called: `get()`, `get(depth)`, `set(value)`, `members()`,
-//! `children()`, `len()`, `type_name()`, `kind()`, `path()`. Global `roots()`, `root(name)`,
+//! `children()`, `len()` (the type's own `len` method if it has one), `type_name()`, `kind()`,
+//! `path()`. Global `roots()`, `root(name)`,
 //! `get(path)`, `get(path, depth)` and `set(path, value)` mirror the other commands.
+//!
+//! The app's own methods are called with method syntax on a node - `APP.inventory.total_value()`,
+//! `board.toggle(2)` - and its free functions by name when the name is unique (`ratio(3, 4)`).
+//! `invoke("util::ratio", [3, 4])` and `node.invoke("len", [])` reach any of them, including ones
+//! whose names clash with the methods above (`call` is Rhai's own, for function pointers). Arguments are passed as JSON, so a node argument passes a
+//! copy of its value; results come back as plain values.
 //!
 //! A script runs on the registry's thread - the UI thread in a Dioxus app - so it is limited to
 //! [`TIME_LIMIT`] and to bounded string, array and map sizes, and it cannot load modules.
 
+use std::any::TypeId;
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -31,13 +39,20 @@ use rhai::module_resolvers::DummyModuleResolver;
 use rhai::{Array, Dynamic, Engine, EvalAltResult, INT, ImmutableString, Map, Position, Scope};
 use serde_json::{Number, Value};
 
-use crate::{Error, Kind, Reflect, Registry, Segment};
+use crate::command::RESULT_DEPTH;
+use crate::{Error, Kind, Reflect, Registry, Segment, call};
 
 /// How long a script may run before it is stopped.
 pub const TIME_LIMIT: Duration = Duration::from_secs(5);
 
-/// How deep a node is copied when it is assigned to another member.
+/// How deep a node is copied when it is assigned to another member or passed to a function.
 const ASSIGN_DEPTH: usize = 64;
+
+/// Names scripts already use; app functions of these names are reached through `call` only.
+const RESERVED: &[&str] = &[
+    "get", "set", "members", "children", "len", "type_name", "kind", "path", "to_string", "to_debug", "call", "invoke", "root",
+    "roots", "print", "debug", "type_of", "eval",
+];
 
 /// Runs `source` and returns its last value as JSON, nodes as snapshots `depth` levels deep.
 /// What the script prints is appended to `output`, also when it fails.
@@ -104,12 +119,44 @@ fn engine(registry: &Rc<Registry>, printed: &Rc<RefCell<Vec<String>>>) -> Engine
         Ok(members.into_iter().map(|member| member.name.into()).collect())
     });
     engine.register_fn("children", |node: Node| node.children().map_err(raise));
-    engine.register_fn("len", |node: Node| node.with(|value| value.member_count() as INT).map_err(raise));
+    engine.register_fn("len", |node: Node| node.len().map_err(raise));
     engine.register_fn("type_name", |node: Node| node.with(|value| value.type_name()).map_err(raise));
     engine.register_fn("kind", |node: Node| node.with(|value| value.kind().as_str()).map_err(raise));
     engine.register_fn("path", |node: Node| node.path());
     engine.register_fn("to_string", |node: Node| node.to_string());
     engine.register_fn("to_debug", |node: Node| node.to_string());
+
+    engine.register_fn("invoke", |node: Node, method: &str, args: Array| node.call(method, &args).map_err(raise));
+    engine.register_fn("invoke", |node: Node, method: &str| node.call(method, &[]).map_err(raise));
+    let shared = Rc::clone(registry);
+    engine.register_fn("invoke", move |target: &str, args: Array| {
+        let args = json_args(&args).map_err(raise)?;
+        shared.call(target, &args, RESULT_DEPTH).map(|value| to_dynamic(&value)).map_err(raise)
+    });
+    let shared = Rc::clone(registry);
+    engine.register_fn("invoke", move |target: &str| shared.call(target, &[], RESULT_DEPTH).map(|value| to_dynamic(&value)).map_err(raise));
+    for (name, arity) in call::method_names() {
+        if RESERVED.contains(&name) {
+            continue;
+        }
+        let mut types = vec![TypeId::of::<Node>()];
+        types.extend(std::iter::repeat_n(TypeId::of::<Dynamic>(), arity));
+        engine.register_raw_fn(name, types, move |_, args: &mut [&mut Dynamic]| {
+            let node = args[0].clone().cast::<Node>();
+            let args: Vec<Dynamic> = args[1..].iter().map(|arg| (**arg).clone()).collect();
+            node.call(name, &args).map_err(raise)
+        });
+    }
+    for (name, arity) in call::free_names() {
+        if RESERVED.contains(&name) {
+            continue;
+        }
+        engine.register_raw_fn(name, vec![TypeId::of::<Dynamic>(); arity], move |_, args: &mut [&mut Dynamic]| {
+            let args: Vec<Dynamic> = args.iter().map(|arg| (**arg).clone()).collect();
+            let args = json_args(&args).map_err(raise)?;
+            call::call_free(name, &args, RESULT_DEPTH).map(|value| to_dynamic(&value)).map_err(raise)
+        });
+    }
 
     let shared = Rc::clone(registry);
     engine.register_fn("roots", move || -> Array { shared.roots().into_iter().map(|root| root.name.into()).collect() });
@@ -234,6 +281,19 @@ impl Node {
         })
     }
 
+    /// The app's own `len()` when the type has one, else the number of members.
+    fn len(&self) -> Result<Dynamic, Error> {
+        match self.call("len", &[]) {
+            Err(Error::NoSuchMethod { .. }) => self.with(|value| (value.member_count() as INT).into()),
+            result => result,
+        }
+    }
+
+    fn call(&self, method: &str, args: &[Dynamic]) -> Result<Dynamic, Error> {
+        let args = json_args(args)?;
+        self.registry.call_method_at(&self.root, &self.segments, method, &args, RESULT_DEPTH).map(|value| to_dynamic(&value))
+    }
+
     fn assign(&self, value: &Dynamic) -> Result<(), Error> {
         if let Some(node) = value.clone().try_cast::<Node>() {
             // Rhai writes back the handles it read through on the way to a member it changed.
@@ -272,6 +332,10 @@ fn member_segment(name: String) -> Segment {
         Some(index) => Segment::Index(index),
         None => Segment::Field(name),
     }
+}
+
+fn json_args(args: &[Dynamic]) -> Result<Vec<serde_json::Value>, Error> {
+    args.iter().map(|arg| to_json(arg, ASSIGN_DEPTH)).collect()
 }
 
 fn raise(error: Error) -> Box<EvalAltResult> {

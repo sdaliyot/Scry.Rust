@@ -1,3 +1,5 @@
+use std::any::Any;
+
 use serde_json::Value;
 
 use crate::{Error, Segment};
@@ -81,6 +83,16 @@ pub trait Reflect {
     fn write_shared(&self, path: &[Segment], visit: VisitMut<'_>) -> Result<(), Error> {
         let _ = (path, visit);
         Err(Error::needs_interior_mutability(self.type_name()))
+    }
+
+    /// This value as `Any`, so a method can be called on it. Given by `#[derive(Reflect)]` for
+    /// types without generic parameters; other values have no callable methods.
+    fn as_any(&self) -> Option<&dyn Any> {
+        None
+    }
+
+    fn as_any_mut(&mut self) -> Option<&mut dyn Any> {
+        None
     }
 
     /// Replaces this value from JSON. Structs take an object of the fields to change; scalars and

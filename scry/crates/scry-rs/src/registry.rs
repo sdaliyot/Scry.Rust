@@ -4,7 +4,7 @@ use serde_json::{Map, Value, json};
 
 use crate::__private::FieldRef;
 use crate::path::parse;
-use crate::{Error, Member, Reflect, Segment, Visit};
+use crate::{Error, Member, Reflect, Segment, Visit, VisitMut};
 
 /// Named roots that paths start from.
 ///
@@ -116,6 +116,11 @@ impl Registry {
         self.find(root)?.1.get().write_shared(segments, &mut |target| target.assign(value))
     }
 
+    /// Resolves `segments` below `root` for writing and calls `visit` on the result.
+    pub(crate) fn write_shared_at(&self, root: &str, segments: &[Segment], visit: VisitMut<'_>) -> Result<(), Error> {
+        self.find(root)?.1.get().write_shared(segments, visit)
+    }
+
     /// An exact root name, or the unique one ending in `::name`.
     fn find(&self, root: &str) -> Result<&(String, Root), Error> {
         if let Some(entry) = self.roots.iter().find(|(name, _)| name == root) {
@@ -156,6 +161,10 @@ impl Registry {
             object.insert("type".into(), Value::String(value.type_name().to_owned()));
             object.insert("kind".into(), Value::String(value.kind().as_str().to_owned()));
             object.insert("members".into(), Value::Array(members));
+            let methods = crate::call::methods_of(value);
+            if !methods.is_empty() {
+                object.insert("methods".into(), json!(methods));
+            }
             description = Value::Object(object);
             Ok(())
         })?;

@@ -22,7 +22,9 @@
 //!   path; from there on it has exclusive access. A path with none of those is refused rather than
 //!   written through an aliased reference, which would be undefined behavior.
 
+mod call;
 mod command;
+mod from_value;
 pub mod endpoint;
 mod error;
 mod impls;

@@ -129,6 +129,16 @@ impl<T> ViaOpaqueOwned for ProbeOwned<'_, T> {
     }
 }
 
+pub use crate::call::{Function, Receiver, This};
+pub use crate::from_value::{
+    ArgProbe, FromValue, RefProbe, SelfProbe, Unconstructible, ViaClone, ViaFromValue, ViaNoClone, ViaNoValue, ViaRefNone,
+    ViaRefOwned, ViaRefValue,
+};
+
+/// Every function the generator made callable, from every crate.
+#[linkme::distributed_slice]
+pub static FUNCTIONS: [Function];
+
 /// Registers one `static` with a registry. The generator emits one per static, next to it, into
 /// `STATICS`; the linker gathers them from every crate into one list.
 pub type StaticEntry = fn(&mut Registry);

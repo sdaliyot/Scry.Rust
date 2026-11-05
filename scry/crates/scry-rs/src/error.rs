@@ -19,6 +19,17 @@ pub enum Error {
     LockBusy { type_name: &'static str },
     BadPath(String),
     BadCommand(String),
+    NoSuchFunction(String),
+    /// A function name matches several functions, or a method name several trait methods.
+    AmbiguousFunction { name: String, candidates: Vec<String> },
+    NoSuchMethod { type_name: &'static str, method: String },
+    ArgumentCount { function: String, expected: usize, found: usize },
+    /// An argument's type cannot be built from JSON.
+    CannotConvert { type_name: &'static str },
+    /// The function exists but cannot be called this way.
+    NotCallable(String),
+    /// The called function panicked.
+    Panicked(String),
     /// A script did not parse, or failed while running.
     Script(String),
     /// A script ran past its time or size limits and was stopped.
@@ -39,6 +50,13 @@ impl Error {
             Error::LockBusy { .. } => "lock_busy",
             Error::BadPath(_) => "bad_path",
             Error::BadCommand(_) => "bad_command",
+            Error::NoSuchFunction(_) => "no_such_function",
+            Error::AmbiguousFunction { .. } => "ambiguous_function",
+            Error::NoSuchMethod { .. } => "no_such_method",
+            Error::ArgumentCount { .. } => "argument_count",
+            Error::CannotConvert { .. } => "cannot_convert",
+            Error::NotCallable(_) => "not_callable",
+            Error::Panicked(_) => "panicked",
             Error::Script(_) => "script_error",
             Error::ScriptLimit(_) => "script_limit",
         }
@@ -76,6 +94,17 @@ impl fmt::Display for Error {
             Error::LockBusy { type_name } => write!(f, "{type_name} stayed locked by the application; try again"),
             Error::BadPath(message) => write!(f, "bad path: {message}"),
             Error::BadCommand(message) => write!(f, "bad command: {message}"),
+            Error::NoSuchFunction(name) => write!(f, "no function named '{name}'"),
+            Error::AmbiguousFunction { name, candidates } => {
+                write!(f, "'{name}' matches several functions: {}", candidates.join(", "))
+            }
+            Error::NoSuchMethod { type_name, method } => write!(f, "{type_name} has no callable method '{method}'"),
+            Error::ArgumentCount { function, expected, found } => {
+                write!(f, "{function} takes {expected} argument(s), got {found}")
+            }
+            Error::CannotConvert { type_name } => write!(f, "an argument of type {type_name} cannot be built from JSON"),
+            Error::NotCallable(message) => write!(f, "not callable: {message}"),
+            Error::Panicked(message) => write!(f, "panicked in {message}"),
             Error::Script(message) => write!(f, "script error: {message}"),
             Error::ScriptLimit(message) => write!(f, "script stopped: {message}"),
         }

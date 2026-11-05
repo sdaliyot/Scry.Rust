@@ -18,6 +18,10 @@ pub fn derive_reflect(input: TokenStream) -> TokenStream {
 }
 
 fn expand(mut input: DeriveInput) -> syn::Result<Tokens> {
+    // A type with generic parameters may not be `'static`, so it gets neither `as_any` - and with
+    // it, callable methods - nor `FromValue`.
+    let concrete = input.generics.params.is_empty();
+
     // A field built from a type parameter is only navigable if the parameter is.
     for parameter in input.generics.type_params_mut() {
         parameter.bounds.push(parse_quote!(::scry::Reflect));
@@ -33,6 +37,37 @@ fn expand(mut input: DeriveInput) -> syn::Result<Tokens> {
 
     let name = &input.ident;
     let (impl_generics, type_generics, where_clause) = input.generics.split_for_impl();
+    let (as_any, from_value) = if concrete {
+        let construct = match &input.data {
+            Data::Struct(data) if !unsized_tail(&data.fields) => Some(construct_struct(&data.fields)),
+            Data::Enum(data) => Some(construct_enum(data)),
+            _ => None,
+        };
+        let from_value = construct.map(|construct| {
+            quote! {
+                #[automatically_derived]
+                #[allow(unused_variables, unused_imports, unreachable_patterns, clippy::all)]
+                impl ::scry::__private::FromValue for #name {
+                    fn from_value(value: &::scry::Value) -> ::core::result::Result<Self, ::scry::Error> {
+                        use ::scry::__private::{ViaFromValue as _, ViaNoValue as _};
+                        #construct
+                    }
+                }
+            }
+        });
+        let as_any = quote! {
+            fn as_any(&self) -> ::core::option::Option<&dyn ::core::any::Any> {
+                ::core::option::Option::Some(self)
+            }
+
+            fn as_any_mut(&mut self) -> ::core::option::Option<&mut dyn ::core::any::Any> {
+                ::core::option::Option::Some(self)
+            }
+        };
+        (as_any, from_value)
+    } else {
+        (Tokens::new(), None)
+    };
     Ok(quote! {
         #[automatically_derived]
         #[allow(unused_variables, unused_imports, unreachable_patterns, clippy::all)]
@@ -41,9 +76,111 @@ fn expand(mut input: DeriveInput) -> syn::Result<Tokens> {
                 ::core::any::type_name::<Self>()
             }
 
+            #as_any
+
             #body
         }
+
+        #from_value
     })
+}
+
+/// A last field such as `[u8]` or `str` makes the type unsized, and unable to be built.
+fn unsized_tail(fields: &Fields) -> bool {
+    fields.iter().next_back().is_some_and(|field| match &field.ty {
+        Type::Slice(_) | Type::TraitObject(_) => true,
+        Type::Path(path) => path.path.is_ident("str"),
+        _ => false,
+    })
+}
+
+fn arg_probe(ty: &Type, value: Tokens) -> Tokens {
+    quote!((&&&::scry::__private::ArgProbe::<#ty>::new()).scry_arg(#value)?)
+}
+
+/// Builds `constructor` (`Self`, `Self::Variant`) with `fields` from the JSON `value`: an object
+/// of named fields; for unnamed fields the object `snapshot` produces (`{"0": .., "1": ..}`),
+/// or the value itself for one field and an array for several, as serde writes them.
+fn construct_fields(constructor: Tokens, fields: &Fields, value: Tokens) -> Tokens {
+    let list = fields_of(fields);
+    match fields {
+        Fields::Named(_) => {
+            let names: Vec<&String> = list.iter().map(|field| &field.name).collect();
+            let members = list.iter().map(|field| &field.member);
+            let values = list.iter().map(|field| {
+                let name = &field.name;
+                arg_probe(field.ty, quote!(object.get(#name).unwrap_or(&::scry::Value::Null)))
+            });
+            quote! {{
+                let object = #value
+                    .as_object()
+                    .ok_or_else(|| ::scry::__private::mismatch("an object of fields", #value))?;
+                if let ::core::option::Option::Some(key) = object.keys().find(|key| ![#(#names),*].contains(&key.as_str())) {
+                    return ::core::result::Result::Err(::scry::Error::NoSuchMember {
+                        type_name: ::core::any::type_name::<Self>(),
+                        member: ::std::clone::Clone::clone(key),
+                    });
+                }
+                ::core::result::Result::Ok(#constructor { #(#members: #values),* })
+            }}
+        }
+        Fields::Unnamed(_) => {
+            let count = list.len();
+            let expected = format!("an array of {count}, or an object of fields \"0\" to \"{}\"", count - 1);
+            let names: Vec<&String> = list.iter().map(|field| &field.name).collect();
+            let values = list.iter().enumerate().map(|(index, field)| arg_probe(field.ty, quote!(&items[#index])));
+            quote! {{
+                let items: ::std::vec::Vec<&::scry::Value> = match (#value.as_object(), #value.as_array()) {
+                    (::core::option::Option::Some(object), _) if object.len() == #count && [#(#names),*].iter().all(|name| object.contains_key(*name)) => {
+                        [#(#names),*].iter().map(|name| &object[*name]).collect()
+                    }
+                    (_, ::core::option::Option::Some(items)) if #count > 1 && items.len() == #count => items.iter().collect(),
+                    _ if #count == 1 => ::std::vec![#value],
+                    _ => return ::core::result::Result::Err(::scry::__private::mismatch(#expected, #value)),
+                };
+                ::core::result::Result::Ok(#constructor(#(#values),*))
+            }}
+        }
+        Fields::Unit => quote!(::core::result::Result::Ok(#constructor)),
+    }
+}
+
+fn construct_struct(fields: &Fields) -> Tokens {
+    construct_fields(quote!(Self), fields, quote!(value))
+}
+
+/// A unit variant from its name as a string; any variant from `{"Variant": fields}`.
+fn construct_enum(data: &DataEnum) -> Tokens {
+    let mut unit_names = Vec::new();
+    let mut unit_idents = Vec::new();
+    let mut names = Vec::new();
+    let mut builds = Vec::new();
+    for variant in &data.variants {
+        let ident = &variant.ident;
+        let name = ident.unraw().to_string();
+        if matches!(variant.fields, Fields::Unit) {
+            unit_names.push(name.clone());
+            unit_idents.push(ident.clone());
+        }
+        builds.push(construct_fields(quote!(Self::#ident), &variant.fields, quote!(fields)));
+        names.push(name);
+    }
+    let expected = format!("a variant: {}", names.join(", "));
+    quote! {
+        if let ::core::option::Option::Some(name) = value.as_str() {
+            return match name {
+                #(#unit_names => ::core::result::Result::Ok(Self::#unit_idents),)*
+                _ => ::core::result::Result::Err(::scry::__private::mismatch(#expected, value)),
+            };
+        }
+        let ::core::option::Option::Some((name, fields)) = value.as_object().filter(|object| object.len() == 1).and_then(|object| object.iter().next()) else {
+            return ::core::result::Result::Err(::scry::__private::mismatch(#expected, value));
+        };
+        match name.as_str() {
+            #(#names => #builds,)*
+            _ => ::core::result::Result::Err(::scry::__private::mismatch(#expected, value)),
+        }
+    }
 }
 
 struct Field<'a> {

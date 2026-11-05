@@ -267,6 +267,14 @@ impl<T: Reflect> Reflect for Option<T> {
         self.as_ref().map_or(0, Reflect::member_count)
     }
 
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        self.as_ref().and_then(Reflect::as_any)
+    }
+
+    fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
+        self.as_mut().and_then(Reflect::as_any_mut)
+    }
+
     fn snapshot(&self, depth: usize) -> Value {
         self.as_ref().map_or(Value::Null, |value| value.snapshot(depth))
     }
@@ -361,6 +369,66 @@ fn sequence_assign<T: Reflect>(items: &mut [T], value: &Value) -> Result<(), Err
     items.iter_mut().zip(values).try_for_each(|(item, value)| item.assign(value))
 }
 
+/// Shown as `{"Ok": value}` or `{"Err": error}`, the way the derive shows an enum, and navigated
+/// through `.Ok` and `.Err`.
+impl<T: Reflect, E: Reflect> Reflect for Result<T, E> {
+    fn type_name(&self) -> &'static str {
+        type_name::<Self>()
+    }
+
+    fn kind(&self) -> Kind {
+        Kind::Enum
+    }
+
+    fn members(&self) -> Vec<Member> {
+        match self {
+            Ok(_) => vec![Member::new("Ok", type_name::<T>())],
+            Err(_) => vec![Member::new("Err", type_name::<E>())],
+        }
+    }
+
+    fn snapshot(&self, depth: usize) -> Value {
+        if depth == 0 {
+            return truncated(self.type_name());
+        }
+        let (variant, value) = match self {
+            Ok(value) => ("Ok", value.snapshot(depth - 1)),
+            Err(error) => ("Err", error.snapshot(depth - 1)),
+        };
+        Value::Object(Map::from_iter([(variant.to_owned(), value)]))
+    }
+
+    fn read(&self, path: &[Segment], visit: Visit<'_>) -> Result<(), Error> {
+        let Some((segment, rest)) = path.split_first() else { return visit(self) };
+        match (self, &*segment.name()) {
+            (Ok(value), "Ok") => value.read(rest, visit),
+            (Err(error), "Err") => error.read(rest, visit),
+            _ => Err(crate::__private::no_member(self.type_name(), segment)),
+        }
+    }
+
+    fn write(&mut self, path: &[Segment], visit: VisitMut<'_>) -> Result<(), Error> {
+        let Some((segment, rest)) = path.split_first() else { return visit(self) };
+        let type_name = self.type_name();
+        match (self, &*segment.name()) {
+            (Ok(value), "Ok") => value.write(rest, visit),
+            (Err(error), "Err") => error.write(rest, visit),
+            _ => Err(crate::__private::no_member(type_name, segment)),
+        }
+    }
+
+    fn write_shared(&self, path: &[Segment], visit: VisitMut<'_>) -> Result<(), Error> {
+        let Some((segment, rest)) = path.split_first() else {
+            return Err(Error::needs_interior_mutability(self.type_name()));
+        };
+        match (self, &*segment.name()) {
+            (Ok(value), "Ok") => value.write_shared(rest, visit),
+            (Err(error), "Err") => error.write_shared(rest, visit),
+            _ => Err(crate::__private::no_member(self.type_name(), segment)),
+        }
+    }
+}
+
 impl<T: Reflect> Reflect for Vec<T> {
     fn type_name(&self) -> &'static str {
         type_name::<Self>()
@@ -396,6 +464,41 @@ impl<T: Reflect> Reflect for Vec<T> {
 
     fn assign(&mut self, value: &Value) -> Result<(), Error> {
         sequence_assign(self, value)
+    }
+}
+
+/// A borrowed slice, as functions return them. Its elements cannot be written through it.
+impl<T: Reflect> Reflect for &[T] {
+    fn type_name(&self) -> &'static str {
+        type_name::<Self>()
+    }
+
+    fn kind(&self) -> Kind {
+        Kind::Sequence
+    }
+
+    fn members(&self) -> Vec<Member> {
+        sequence_members(self)
+    }
+
+    fn member_count(&self) -> usize {
+        <[_]>::len(self)
+    }
+
+    fn snapshot(&self, depth: usize) -> Value {
+        sequence_snapshot(self, self.type_name(), depth)
+    }
+
+    fn read(&self, path: &[Segment], visit: Visit<'_>) -> Result<(), Error> {
+        if path.is_empty() { visit(self) } else { sequence_read(self, path, visit) }
+    }
+
+    fn write(&mut self, _path: &[Segment], _visit: VisitMut<'_>) -> Result<(), Error> {
+        Err(Error::not_writable(format!("{} is a shared borrow", self.type_name())))
+    }
+
+    fn write_shared(&self, path: &[Segment], visit: VisitMut<'_>) -> Result<(), Error> {
+        sequence_write_shared(self, self.type_name(), path, visit)
     }
 }
 
