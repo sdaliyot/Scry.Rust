@@ -44,3 +44,5 @@ serde_json.workspace = true
 serde = { version = "1", features = ["derive"] }
 parking_lot = "0.12"
 tokio = { version = "1", default-features = false, features = ["sync", "rt", "time"] }
+# The crate's own tests use its tokio support (tests/async_calls.rs), whatever else is built.
+scry = { package = "scry-rs", path = ".", features = ["tokio"] }

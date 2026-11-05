@@ -217,7 +217,12 @@ impl<'ast> Visit<'ast> for Generator<'_> {
             let path = path.join("::");
             self.edits.insert(
                 self.source.end(item.semi_token.span),
-                static_registration(&name, &path, &item.ty.to_token_stream().to_string()),
+                static_registration(
+                    &name,
+                    &path,
+                    &item.ty.to_token_stream().to_string(),
+                    &functions::cfgs(&item.attrs).to_string(),
+                ),
             );
             self.report.generated("static", &path);
         } else {
@@ -692,9 +697,11 @@ const IMPL_METHODS: &str = " #[allow(clippy::all, clippy::pedantic, clippy::nurs
 
 /// Registers a static, with a peeler for its type (see `scry::peel`) so a foreign type inside a
 /// container the static's type names is reached.
-fn static_registration(name: &str, path: &str, ty: &str) -> String {
+/// `cfgs` are the static's own `#[cfg]` attributes: a static that only exists in some builds is
+/// only registered in those.
+fn static_registration(name: &str, path: &str, ty: &str, cfgs: &str) -> String {
     format!(
-        " #[::scry::__private::linkme::distributed_slice(::scry::__private::STATICS)] \
+        " {cfgs} #[::scry::__private::linkme::distributed_slice(::scry::__private::STATICS)] \
          #[linkme(crate = ::scry::__private::linkme)] #[doc(hidden)] #[allow(non_upper_case_globals, clippy::all, clippy::pedantic, clippy::nursery, clippy::restriction)] \
          static __SCRY_STATIC_{name}: ::scry::__private::StaticEntry = {{ \
          fn __scry_register(registry: &mut ::scry::Registry) {{ \
@@ -980,37 +987,31 @@ fn mentions_self(tokens: &impl ToTokens) -> bool {
     })
 }
 
-/// The components `fn main` launches - `dioxus::launch(App)`, `LaunchBuilder::new().launch(App)` -
-/// which pump the endpoint's requests on the UI thread.
+/// The components the crate launches - `dioxus::launch(App)`, `LaunchBuilder::new().launch(App)`,
+/// `builder.launch(layout::Root)` - anywhere in it, not only in `main`: an app may launch from a
+/// `run()` that `main` dispatches to. They pump the endpoint's requests on the UI thread. Matched
+/// by the component's name, and only a capitalized one, as components are, so a `launch(config)`
+/// of something else is not mistaken for one. Of several, the first to mount pumps.
 #[derive(Default)]
 pub struct LaunchCollector {
-    in_main: bool,
     pub roots: HashSet<String>,
 }
 
 impl LaunchCollector {
     fn root(&mut self, args: &syn::punctuated::Punctuated<Expr, syn::Token![,]>) {
         if let Some(Expr::Path(path)) = args.first()
-            && let Some(ident) = path.path.get_ident()
+            && path.qself.is_none()
+            && let Some(last) = path.path.segments.last()
+            && last.ident.to_string().starts_with(|c: char| c.is_ascii_uppercase())
         {
-            self.roots.insert(ident.to_string());
+            self.roots.insert(last.ident.to_string());
         }
     }
 }
 
 impl<'ast> Visit<'ast> for LaunchCollector {
-    fn visit_item_fn(&mut self, item: &'ast ItemFn) {
-        let was = self.in_main;
-        self.in_main = item.sig.ident == "main";
-        visit::visit_item_fn(self, item);
-        self.in_main = was;
-    }
-
-    fn visit_item_mod(&mut self, _item: &'ast ItemMod) {}
-
     fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
-        if self.in_main
-            && let Expr::Path(func) = &*call.func
+        if let Expr::Path(func) = &*call.func
             && func.path.segments.last().is_some_and(|segment| segment.ident == "launch")
         {
             self.root(&call.args);
@@ -1019,7 +1020,7 @@ impl<'ast> Visit<'ast> for LaunchCollector {
     }
 
     fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
-        if self.in_main && call.method == "launch" {
+        if call.method == "launch" {
             self.root(&call.args);
         }
         visit::visit_expr_method_call(self, call);
@@ -1306,6 +1307,48 @@ let _9: Cache<u8, u8>;
         let cache = out.lines().find(|line| line.starts_with("impl<K: Clone, V>")).unwrap();
         assert!(cache.contains("TypeId :: of :: < Cache < u32 , crate :: Item > >"), "{cache}");
         assert!(cache.contains("probe_ref_arg ! (u32"), "K is replaced: {cache}");
+    }
+
+    #[test]
+    fn handles_patterns_from_a_real_app() {
+        let text = "#[cfg(feature = \"server\")] static GLOBAL: u8 = 0;
+fn keep(name: &'static str) {}
+fn verify(cert: &Cert<'_>, names: &[&'static str]) {}
+";
+        let (out, report) = rewrite(text, false);
+        let lines: Vec<&str> = out.lines().collect();
+        assert!(
+            lines[0].contains("# [cfg (feature = \"server\")] #[::scry::__private::linkme"),
+            "a static's cfg is kept: {}",
+            lines[0]
+        );
+        assert!(lines[1].contains("Box :: leak"), "a 'static parameter gets a value that lives for good: {}", lines[1]);
+        assert!(
+            lines[2].contains("Unconstructible < Cert < '_ > >") && lines[2].contains("arg0 . lend ()"),
+            "{}",
+            lines[2]
+        );
+        assert!(
+            lines[2].contains("Unconstructible < [& 'static str] >") && lines[2].contains("arg1 . lend ()"),
+            "{}\n{report}",
+            lines[2]
+        );
+    }
+
+    #[test]
+    fn finds_launched_root_components_anywhere_in_the_crate() {
+        let file = syn::parse_file(
+            "fn main() { client::run() }
+mod client { pub fn run() { let app = boot(); app.launch(layout::RootLayout); } }
+fn other() { dioxus::launch(App); rocket.launch(config); Server::launch(settings); }
+",
+        )
+        .unwrap();
+        let mut launches = LaunchCollector::default();
+        launches.visit_file(&file);
+        let mut roots: Vec<&String> = launches.roots.iter().collect();
+        roots.sort();
+        assert_eq!(roots, ["App", "RootLayout"], "only capitalized components, by their last segment");
     }
 
     #[test]

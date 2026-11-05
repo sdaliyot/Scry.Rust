@@ -883,3 +883,14 @@ impl<T: ?Sized> Borrow<T> for Unconstructible<T> {
         match self.0 {}
     }
 }
+
+impl<T: ?Sized> Unconstructible<T> {
+    /// A `&T` of any lifetime, for a parameter that needs one longer than the shim's locals. Sound
+    /// because no `Unconstructible` ever exists to call it on.
+    pub fn lend<'a>(&self) -> &'a T
+    where
+        T: 'a,
+    {
+        match self.0 {}
+    }
+}

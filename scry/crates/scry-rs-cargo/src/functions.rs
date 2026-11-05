@@ -247,9 +247,28 @@ pub fn shim(
                     }
                     Type::Reference(reference) => {
                         let elem = &reference.elem;
-                        let build = build_from_json(quote!(probe_ref_arg), elem, quote!(&args[#index]));
-                        lets.push(quote!(let #binding = #build?;));
-                        args.push(quote!(::core::borrow::Borrow::<#elem>::borrow(&#binding)));
+                        if borrows(elem) {
+                            // Never built (see `build_from_json`); typed, so it still stands in for
+                            // the reference the call takes.
+                            let name = compact(&**elem);
+                            lets.push(quote! {
+                                let #binding: ::scry::__private::Unconstructible<#elem> = ::core::result::Result::Err(
+                                    ::scry::Error::CannotConvert { type_name: #name },
+                                )?;
+                            });
+                            args.push(quote!(#binding.lend()));
+                        } else {
+                            lets.push(quote!(let #binding = ::scry::__private::probe_ref_arg!(#elem, &args[#index])?;));
+                            let forever =
+                                reference.lifetime.as_ref().is_some_and(|lifetime| lifetime.ident == "static");
+                            args.push(if forever {
+                                // A `&'static T` parameter may be kept for good, so the value built
+                                // for it is leaked: a few bytes per call, for calls made from outside.
+                                quote!(::core::borrow::Borrow::<#elem>::borrow(&*::std::boxed::Box::leak(::std::boxed::Box::new(#binding))))
+                            } else {
+                                quote!(::core::borrow::Borrow::<#elem>::borrow(&#binding))
+                            });
+                        }
                     }
                     ty => {
                         let build = build_from_json(quote!(probe_arg), &ty, quote!(&args[#index]));

@@ -32,6 +32,26 @@ the registry generated in. It writes to `target/scry`, so the normal and Scry bu
 `cargo scry clippy [args] [-- lint args]` lints the rewritten code. The generated parts allow every
 lint group, so only the app's own code is reported.
 
+### Apps built with `dx`
+
+A Dioxus app that loads files with `asset!()` (stylesheets, icons, scripts) has to be built by the
+Dioxus CLI: only `dx` bundles those files and fills in their URLs. Built with plain cargo, the app
+starts but its assets come back 404, so it shows unstyled. For these apps, put `dx` after `cargo scry`:
+
+```powershell
+cargo scry dx build --platform desktop --features desktop
+cargo scry dx serve --platform desktop      # likewise for serve, bundle, ...
+```
+
+This runs `dx` with `--features scry` and the serde features described under "Third-party types".
+The output goes where `dx` puts it, under `target/scry/dx/...` instead of `target/dx/...`.
+`dx` takes the rustc wrapper slot for itself and then runs `rustc` by name. So `cargo scry dx` puts
+a copy of `cargo-scry` named `rustc` first on the `PATH` it passes to `dx`. The copy is kept under
+the system temp folder, in a `scry-rustc` folder, one copy per build of `cargo-scry`. Only the crates
+`dx` hands on reach the copy. These are the workspace crates. Dependencies, build scripts and
+cargo's own probes get the real `rustc` through `RUSTC`. Hot patching (`dx serve --hot-patch`)
+compiles patches with its own rustc call, and these patches get no Scry code.
+
 ## Trying it
 
 ```powershell
@@ -154,6 +174,14 @@ Some parameters and functions are handled specially:
 
   `Send`, `Sync` and lifetimes may come along. Any other bound, and every closure (`impl Fn`),
   leaves the function uncallable.
+- **`&'static` parameters** (`&'static str`, `&'static Config`): the argument is built from JSON
+  and leaked, since nothing shorter-lived can be passed. Each call leaks one value; nothing is
+  leaked until such a function is called.
+- **References to borrowing types** (`&[&str]`, `&Cert<'_>`): a value that holds borrows can't be
+  built from JSON. Such a function still compiles and is listed, but calling it fails with
+  `cannot_convert`. Likewise, a struct or enum with a field like `label: &'static str` is read
+  normally, but building a whole one from JSON fails with `cannot_convert`. Its unit variants can
+  still be assigned (`set tab.route "Home"`), including empty ones such as `Home {}` and `Blank()`.
 - **`async fn`, or one returning `impl Future`:** it runs to completion on the registry's thread.
   In a tokio app it runs inside the app's own runtime, which the endpoint picks up at the top of
   `main` (`#[tokio::main]` included), so timers, I/O and `spawn` work. A call still running after
@@ -351,12 +379,15 @@ what was generated and skipped are kept under `target/scry/<profile>/scry-src/<c
 every line where it was, so errors, panics and the debugger still point at the original files. It adds:
 
 - `#[derive(Reflect)]` on every struct and enum, including types defined by the crate's own `macro_rules!`
-- a registration for every non-`mut` static, by its full path (`console_demo::APP`, also reachable as `APP`)
+- a registration for every non-`mut` static, by its full path (`console_demo::APP`, also reachable as `APP`).
+  A `#[cfg]` on the static is copied to its registration.
 - reflection through `Box<dyn Trait>` for every trait that can be used as `dyn Trait`
 - for Dioxus crates, tracking of `use_signal`/`use_signal_sync`/`use_context_provider`/`use_memo` results under `ui.<Component>.<binding>`
 - a call shim for every callable function and method (see above)
 - a hook point in every hookable function (see above)
-- the endpoint, started at the top of `main` (and, for Dioxus, pumped from the launched root component)
+- the endpoint, started at the top of `main`. For Dioxus, it is pumped from each root component the
+  crate launches (`launch(App)`, `LaunchBuilder::...launch(App)`), from any function of the crate,
+  not only `main`.
 
 The endpoint listens on `127.0.0.1` on a port the OS picks. It writes a descriptor holding the pid, the
 port and a random token to `%USERPROFILE%\.scry-rs\targets` (`~/.scry-rs/targets` elsewhere;

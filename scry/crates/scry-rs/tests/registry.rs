@@ -373,3 +373,32 @@ fn assigning_into_none_builds_the_value() {
     assert_eq!(profile.lock().unwrap().home.as_ref().unwrap().name, "cup");
     assert_eq!(execute(&registry, "set profile.nickname null")["result"], json!(null));
 }
+
+/// Shapes from a real Dioxus app: a router enum with `Variant {}` routes, and a struct of
+/// `&'static str` labels, which can be read but never built from JSON.
+#[derive(Reflect, Debug, PartialEq)]
+enum Route {
+    Home {},
+    Page { id: u32 },
+    Blank(),
+}
+
+#[derive(Reflect)]
+struct NavTab {
+    label: &'static str,
+    route: std::sync::Mutex<Route>,
+}
+
+#[test]
+fn router_enums_and_static_str_fields_reflect() {
+    static TAB: NavTab = NavTab { label: "Alarms", route: std::sync::Mutex::new(Route::Page { id: 3 }) };
+    let mut registry = Registry::new();
+    registry.add_static("tab", &TAB);
+    assert_eq!(execute(&registry, "get tab.label")["result"], json!("Alarms"));
+    assert_eq!(execute(&registry, "set tab.route \"Home\"")["ok"], json!(true));
+    assert_eq!(*TAB.route.lock().unwrap(), Route::Home {});
+    assert_eq!(execute(&registry, "set tab.route \"Blank\"")["ok"], json!(true));
+    assert_eq!(*TAB.route.lock().unwrap(), Route::Blank());
+    let built: Result<NavTab, scry::Error> = scry::__private::FromValue::from_value(&json!({ "label": "x" }));
+    assert_eq!(built.err().map(|error| error.code()), Some("cannot_convert"));
+}

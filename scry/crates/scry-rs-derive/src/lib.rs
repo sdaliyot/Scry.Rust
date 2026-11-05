@@ -128,7 +128,16 @@ fn unsized_tail(fields: &Fields) -> bool {
     })
 }
 
+/// A field's value built from JSON. A type that borrows (`&'static str`, `Cow<'a, str>`) is never
+/// built: JSON has nothing to lend it, and probing it can pick a `Deserialize` impl that holds for
+/// one lifetime only, which fails to compile.
 fn arg_probe(ty: &Type, value: Tokens) -> Tokens {
+    let text = quote!(#ty).to_string();
+    if text.contains('&') || text.contains('\'') {
+        return quote! {
+            ::core::result::Result::<#ty, ::scry::Error>::Err(::scry::Error::CannotConvert { type_name: #text })?
+        };
+    }
     quote!(::scry::__private::probe_arg!(#ty, #value)?)
 }
 
@@ -158,6 +167,7 @@ fn construct_fields(constructor: Tokens, fields: &Fields, value: Tokens) -> Toke
                 ::core::result::Result::Ok(#constructor { #(#members: #values),* })
             }}
         }
+        Fields::Unnamed(_) if list.is_empty() => quote!(::core::result::Result::Ok(#constructor())),
         Fields::Unnamed(_) => {
             let count = list.len();
             let expected = format!("an array of {count}, or an object of fields \"0\" to \"{}\"", count - 1);
@@ -488,7 +498,14 @@ fn expand_enum(data: &DataEnum, params: Option<&[Ident]>) -> Tokens {
             .collect();
 
         if fields.is_empty() {
-            unit_variants.push((variant.ident.clone(), variant_name.clone()));
+            // `Unit`, but also `Unit {}` and `Unit()`, as router enums write their routes.
+            let ident = &variant.ident;
+            let constructor = match &variant.fields {
+                Fields::Named(_) => quote!(Self::#ident {}),
+                Fields::Unnamed(_) => quote!(Self::#ident()),
+                Fields::Unit => quote!(Self::#ident),
+            };
+            unit_variants.push((constructor, variant_name.clone()));
         }
 
         member_arms.push(quote! {
@@ -530,7 +547,7 @@ fn expand_enum(data: &DataEnum, params: Option<&[Ident]>) -> Tokens {
         });
     }
 
-    let unit_idents = unit_variants.iter().map(|(ident, _)| ident);
+    let unit_constructors = unit_variants.iter().map(|(constructor, _)| constructor);
     let unit_names: Vec<&String> = unit_variants.iter().map(|(_, name)| name).collect();
     let expected = if unit_names.is_empty() {
         "a unit variant name (this enum has none)".to_owned()
@@ -594,7 +611,7 @@ fn expand_enum(data: &DataEnum, params: Option<&[Ident]>) -> Tokens {
         fn assign(&mut self, value: &::scry::Value) -> ::core::result::Result<(), ::scry::Error> {
             match value.as_str() {
                 #(::core::option::Option::Some(#unit_names) => {
-                    *self = Self::#unit_idents;
+                    *self = #unit_constructors;
                     ::core::result::Result::Ok(())
                 })*
                 _ => ::core::result::Result::Err(::scry::__private::mismatch(#expected, value)),

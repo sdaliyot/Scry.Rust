@@ -97,7 +97,9 @@ pub fn rewrite_crate(
     }
     let dyn_traits = resolve_dyn_traits(&traits.traits, &mut report);
     let mut launches = LaunchCollector::default();
-    launches.visit_file(&files[0].syntax);
+    for file in &files {
+        launches.visit_file(&file.syntax);
+    }
 
     let mut index = Index::default();
     for file in &files {

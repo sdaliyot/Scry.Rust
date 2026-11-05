@@ -130,6 +130,9 @@ fn serde_features(metadata: &Value, package: &Value, exclude: &[String]) -> Vec<
             continue; // dev and build dependencies hold none of the app's state
         }
         let Some(name) = dependency["name"].as_str() else { continue };
+        if name.starts_with("serde") {
+            continue; // serde's own crates: their "serde" features are parts of serde, not support for it
+        }
         let key = dependency["rename"].as_str().unwrap_or(name);
         if exclude.iter().any(|excluded| excluded == key) {
             continue;
@@ -226,6 +229,7 @@ mod tests {
                         { "name": "plain", "kind": null, "rename": null, "optional": false, "features": [] },
                         { "name": "on", "kind": null, "rename": null, "optional": false, "features": ["serde"] },
                         { "name": "testy", "kind": "dev", "rename": null, "optional": false, "features": [] },
+                        { "name": "serde", "kind": null, "rename": null, "optional": false, "features": [] },
                     ]
                 },
                 { "id": "other", "name": "other", "manifest_path": "/none/other/Cargo.toml", "dependencies": [] },
@@ -235,10 +239,12 @@ mod tests {
                 { "id": "on", "name": "on", "features": { "serde": ["dep:serde"] } },
                 { "id": "testy", "name": "testy", "features": { "serde": ["dep:serde"] } },
                 { "id": "tokio", "name": "tokio", "features": {} },
+                { "id": "serde", "name": "serde", "features": { "serde_derive": ["dep:serde_derive"] } },
             ],
             "resolve": { "nodes": [
                 { "id": "app", "deps": [
                     { "pkg": "uuid" }, { "pkg": "chrono" }, { "pkg": "plain" }, { "pkg": "on" }, { "pkg": "testy" },
+                    { "pkg": "serde" },
                 ] },
             ] },
         })

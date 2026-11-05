@@ -548,6 +548,7 @@ dependencies = [
  "lock_api",
  "parking_lot",
  "rhai",
+ "scry-rs",
  "scry-rs-derive",
  "serde",
  "serde_json",
