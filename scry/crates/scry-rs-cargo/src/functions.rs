@@ -8,13 +8,16 @@
 //! What can be called: module-level functions, and the methods and associated functions of
 //! module-level `impl` blocks, inherent or trait. What cannot, and why:
 //!
-//! - generic functions and generic impls (`T` has to be chosen; instantiations are not named yet)
+//! - generic functions and impls, except for the instantiations the crate itself calls (see
+//!   [`crate::generics`]): each of those gets a shim of its own
 //! - `async` and `unsafe` functions
 //! - methods taking `self` through `Box`/`Rc`/`Arc`; one taking `self` by value is called on a
 //!   clone, and refused at run time if the type is not `Clone`
 //! - parameters taking `&mut` or `impl Trait`
 //! - `main`, tests, and Dioxus components (capitalized names, `#[component]`): they only work
 //!   when the framework calls them
+
+use std::collections::HashMap;
 
 use proc_macro2::TokenStream;
 use quote::{ToTokens, quote};
@@ -75,6 +78,21 @@ pub struct Callee<'a> {
     pub trait_path: Option<&'a Path>,
     /// `#[cfg]` attributes to repeat on the shim.
     pub cfgs: TokenStream,
+    /// Concrete types for the generic parameters of the function or impl being instantiated.
+    pub subst: HashMap<String, Type>,
+    /// An instantiated generic function's `::<..>`.
+    pub turbofish: Option<TokenStream>,
+    /// The path to list, when it differs from the written one: `describe::<Item>`,
+    /// `Cache<u32, String>`.
+    pub label: Option<String>,
+    /// Tells apart the shims of one function's instantiations.
+    pub variant: usize,
+}
+
+impl<'a> Callee<'a> {
+    pub fn new(self_ty: Option<&'a Type>, trait_path: Option<&'a Path>, cfgs: TokenStream) -> Self {
+        Self { self_ty, trait_path, cfgs, subst: HashMap::new(), turbofish: None, label: None, variant: 0 }
+    }
 }
 
 /// The `static` to insert after the function, or why there is none.
@@ -103,7 +121,12 @@ pub fn shim(source: &Source, attrs: &[Attribute], sig: &Signature, callee: &Call
     if sig.variadic.is_some() {
         return Err("it is variadic".into());
     }
-    if sig.generics.params.iter().any(|param| !matches!(param, GenericParam::Lifetime(_))) {
+    let unbound = sig.generics.params.iter().any(|param| match param {
+        GenericParam::Lifetime(_) => false,
+        GenericParam::Type(param) => !callee.subst.contains_key(&param.ident.to_string()),
+        GenericParam::Const(_) => true,
+    });
+    if unbound {
         return Err("it is generic".into());
     }
 
@@ -140,7 +163,7 @@ pub fn shim(source: &Source, attrs: &[Attribute], sig: &Signature, callee: &Call
             }
             FnArg::Typed(typed) => {
                 let index = lets.len();
-                let ty = spell(&typed.ty, callee.self_ty)?;
+                let ty = spell(&typed.ty, callee.self_ty, &callee.subst)?;
                 let binding = quote::format_ident!("arg{index}");
                 match ty {
                     Type::Reference(reference) => {
@@ -166,13 +189,21 @@ pub fn shim(source: &Source, attrs: &[Attribute], sig: &Signature, callee: &Call
     let arity = lets.len();
 
     let ident = &sig.ident;
+    let turbofish = &callee.turbofish;
     let (callee_tokens, path) = match (callee.self_ty, callee.trait_path) {
         (Some(self_ty), Some(trait_path)) => (
             quote!(<#self_ty as #trait_path>::#ident),
-            format!("<{} as {}>::{name}", compact(self_ty), compact(trait_path)),
+            format!(
+                "<{} as {}>::{name}",
+                callee.label.clone().unwrap_or_else(|| compact(self_ty)),
+                compact(trait_path)
+            ),
         ),
-        (Some(self_ty), None) => (quote!(<#self_ty>::#ident), format!("{}::{name}", compact(self_ty))),
-        (None, _) => (quote!(#ident), name.clone()),
+        (Some(self_ty), None) => (
+            quote!(<#self_ty>::#ident),
+            format!("{}::{name}", callee.label.clone().unwrap_or_else(|| compact(self_ty))),
+        ),
+        (None, _) => (quote!(#ident #turbofish), callee.label.clone().unwrap_or_else(|| name.clone())),
     };
     let self_type = match callee.self_ty {
         Some(self_ty) => quote! {{
@@ -190,8 +221,8 @@ pub fn shim(source: &Source, attrs: &[Attribute], sig: &Signature, callee: &Call
     };
     let signature = signature_text(source, sig);
     let path = format!("::{path}");
-    let unique =
-        quote::format_ident!("__SCRY_FN_{}_{}", sig.ident.span().start().line, sig.ident.span().start().column);
+    let start = sig.ident.span().start();
+    let unique = quote::format_ident!("__SCRY_FN_{}_{}_{}", start.line, start.column, callee.variant);
 
     let cfgs = &callee.cfgs;
     let shim = quote! {
@@ -230,12 +261,9 @@ pub fn shim(source: &Source, attrs: &[Attribute], sig: &Signature, callee: &Call
     Ok(format!(" {shim}"))
 }
 
-/// Whether an `impl` block's methods can get shims: not generic, and for a type the shim can
-/// name as `'static` (`TypeId` needs that).
-pub fn impl_skip_reason(generics: &syn::Generics, self_ty: &Type) -> Option<&'static str> {
-    if !generics.params.is_empty() {
-        return Some("the impl is generic");
-    }
+/// Whether an `impl` block's methods can get shims: for a type the shim can name as `'static`
+/// (`TypeId` needs that). Generic blocks are instantiated by the generator first.
+pub fn impl_skip_reason(self_ty: &Type) -> Option<&'static str> {
     if !matches!(self_ty, Type::Path(path) if path.qself.is_none()) {
         return Some("its type is not a plain path");
     }
@@ -258,9 +286,10 @@ fn is_self(ty: &Type) -> bool {
 
 /// A parameter type as the shim writes it, outside the function: `Self` replaced by the impl's
 /// type, and named lifetimes - not in scope there - by `'_`.
-fn spell(ty: &Type, self_ty: Option<&Type>) -> Result<Type, String> {
+pub fn spell(ty: &Type, self_ty: Option<&Type>, subst: &HashMap<String, Type>) -> Result<Type, String> {
     struct Spell<'a> {
         self_ty: Option<&'a Type>,
+        subst: &'a HashMap<String, Type>,
         problem: Option<&'static str>,
     }
     impl VisitMut for Spell<'_> {
@@ -273,6 +302,13 @@ fn spell(ty: &Type, self_ty: Option<&Type>) -> Result<Type, String> {
                     Some(self_ty) => *ty = self_ty.clone(),
                     None => self.problem = Some("it mentions Self outside an impl"),
                 },
+                Type::Path(path)
+                    if path.qself.is_none()
+                        && let Some(ident) = path.path.get_ident()
+                        && let Some(concrete) = self.subst.get(&ident.to_string()) =>
+                {
+                    *ty = concrete.clone();
+                }
                 _ => visit_mut::visit_type_mut(self, ty),
             }
         }
@@ -291,7 +327,7 @@ fn spell(ty: &Type, self_ty: Option<&Type>) -> Result<Type, String> {
         }
     }
     let mut ty = ty.clone();
-    let mut spell = Spell { self_ty, problem: None };
+    let mut spell = Spell { self_ty, subst, problem: None };
     spell.visit_type_mut(&mut ty);
     match spell.problem {
         Some(problem) => Err(problem.into()),

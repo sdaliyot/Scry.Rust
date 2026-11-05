@@ -20,6 +20,7 @@
 mod edits;
 mod functions;
 mod generate;
+mod generics;
 mod rewrite;
 mod tokens;
 mod wrapper;

@@ -100,14 +100,24 @@ fn methods(type_id: TypeId) -> impl Iterator<Item = &'static Function> {
     })
 }
 
-/// A free or associated function by its full path, or by a unique `::`-suffix of it.
+/// A free or associated function by its full path, or by a unique `::`-suffix of it. An
+/// instantiation of a generic function (`model::ratio::<u32>`) also answers to its path without
+/// the type arguments, when it is the only one.
 fn free(name: &str) -> Result<&'static Function, Error> {
     let candidates: Vec<&Function> = all().iter().filter(|function| function.receiver == Receiver::None).collect();
     if let Some(function) = candidates.iter().find(|function| function.path == name) {
         return Ok(function);
     }
     let suffix = format!("::{name}");
-    let matches: Vec<&Function> = candidates.into_iter().filter(|function| function.path.ends_with(&suffix)).collect();
+    let mut matches: Vec<&Function> =
+        candidates.iter().copied().filter(|function| function.path.ends_with(&suffix)).collect();
+    if matches.is_empty() {
+        let base = |function: &&Function| function.path.split("::<").next().unwrap_or(function.path).to_owned();
+        matches = candidates
+            .into_iter()
+            .filter(|function| base(function) == name || base(function).ends_with(&suffix))
+            .collect();
+    }
     match matches.as_slice() {
         [function] => Ok(function),
         [] => Err(Error::NoSuchFunction(name.to_owned())),

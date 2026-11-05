@@ -10,7 +10,8 @@
 //! - **Statics**: a registration next to each non-`mut` static, which `Registry::discovered`
 //!   collects at runtime.
 //! - **Functions**: a call shim next to each module-level function and each method of a
-//!   module-level `impl`; see [`crate::functions`] for which ones qualify.
+//!   module-level `impl`; see [`crate::functions`] for which ones qualify. Generic ones get one
+//!   per instantiation the crate calls, found in its MIR; see [`crate::generics`].
 //! - **Dioxus hooks** (crates that depend on `dioxus`): `let x = use_signal(..)` and the other
 //!   state hooks also record their handle under the component's name; see `scry::dioxus_hooks`.
 //! - **Endpoint** (executables): started at the top of `main`; in a Dioxus app the components
@@ -31,6 +32,7 @@ use syn::{
 
 use crate::edits::{Edits, Source};
 use crate::functions::{self, Callee};
+use crate::generics::{self, Index, Use};
 use crate::tokens;
 
 /// Hooks whose result is a state handle worth tracking.
@@ -62,6 +64,11 @@ pub struct Context<'a> {
     /// For an executable: start the endpoint in `main`, and for a Dioxus app pump it from these
     /// root components (the ones `main` launches).
     pub endpoint: Option<&'a HashSet<String>>,
+    /// The crate's types and modules, to name generic arguments from a shim.
+    pub index: &'a Index,
+    /// The concrete uses of the crate's generic functions and types, by name.
+    pub uses: &'a HashMap<String, HashSet<Use>>,
+    pub crate_name: &'a str,
 }
 
 pub struct Generator<'a> {
@@ -72,6 +79,8 @@ pub struct Generator<'a> {
     /// The crate root file, where `fn main` is.
     entry: bool,
     inline_mods: usize,
+    /// The module being visited, from the crate root.
+    module: Vec<String>,
     fns: Vec<String>,
 }
 
@@ -82,8 +91,9 @@ impl<'a> Generator<'a> {
         cx: &'a Context<'a>,
         report: &'a mut Report,
         entry: bool,
+        module: Vec<String>,
     ) -> Self {
-        Self { source, edits, cx, report, entry, inline_mods: 0, fns: Vec::new() }
+        Self { source, edits, cx, report, entry, inline_mods: 0, module, fns: Vec::new() }
     }
 
     fn start_endpoint(&mut self, item: &ItemFn) {
@@ -205,16 +215,7 @@ impl<'ast> Visit<'ast> for Generator<'_> {
     fn visit_item_fn(&mut self, item: &'ast ItemFn) {
         self.start_endpoint(item);
         if self.fns.is_empty() {
-            let name = item.sig.ident.to_string();
-            let callee = Callee { self_ty: None, trait_path: None, cfgs: functions::cfgs(&item.attrs) };
-            match functions::shim(self.source, &item.attrs, &item.sig, &callee) {
-                Ok(shim) => {
-                    self.edits.insert(self.source.end(item.block.brace_token.span.close()), shim);
-                    self.report.generated("fn", &name);
-                }
-                Err(reason) if name == "main" => drop(reason),
-                Err(reason) => self.report.skipped("fn", &name, &reason),
-            }
+            self.fn_shims(item);
         }
         self.fns.push(item.sig.ident.to_string());
         visit::visit_item_fn(self, item);
@@ -223,7 +224,9 @@ impl<'ast> Visit<'ast> for Generator<'_> {
 
     fn visit_item_mod(&mut self, item: &'ast ItemMod) {
         self.inline_mods += 1;
+        self.module.push(item.ident.to_string());
         visit::visit_item_mod(self, item);
+        self.module.pop();
         self.inline_mods -= 1;
     }
 
@@ -263,19 +266,162 @@ impl<'ast> Visit<'ast> for Generator<'_> {
 }
 
 impl Generator<'_> {
-    /// Shims for the functions of a module-level `impl` block, all placed after its closing brace.
+    /// The shim for a module-level function, or one per concrete use of a generic one.
+    fn fn_shims(&mut self, item: &ItemFn) {
+        let name = item.sig.ident.to_string();
+        let cfgs = functions::cfgs(&item.attrs);
+        let params: Vec<String> = item.sig.generics.type_params().map(|param| param.ident.to_string()).collect();
+        if params.is_empty() || item.sig.generics.const_params().next().is_some() {
+            match functions::shim(self.source, &item.attrs, &item.sig, &Callee::new(None, None, cfgs)) {
+                Ok(shim) => {
+                    self.edits.insert(self.source.end(item.block.brace_token.span.close()), shim);
+                    self.report.generated("fn", &name);
+                }
+                Err(_) if name == "main" => {}
+                Err(reason) => self.report.skipped("fn", &name, &reason),
+            }
+            return;
+        }
+
+        let mut uses: Vec<&Use> = self
+            .cx
+            .uses
+            .get(&name)
+            .into_iter()
+            .flatten()
+            .filter(|use_| {
+                use_.method.is_none()
+                    && generics::qualifies(&use_.qualifier, &self.module, self.cx.crate_name)
+                    && !self.inside_generic_code(&type_args(&use_.args))
+            })
+            .collect();
+        uses.sort_by(|a, b| a.args.cmp(&b.args));
+        uses.dedup_by(|a, b| a.args == b.args);
+        let mut shims = String::new();
+        let mut problems = Vec::new();
+        for (variant, use_) in uses.iter().enumerate() {
+            let args = type_args(&use_.args);
+            let resolved = match self.resolve_all(&args, params.len()) {
+                Ok(resolved) => resolved,
+                Err(problem) => {
+                    problems.push(problem);
+                    continue;
+                }
+            };
+            let label = format!("{name}::<{}>", args.join(", "));
+            let mut callee = Callee::new(None, None, cfgs.clone());
+            callee.subst = params.iter().cloned().zip(resolved.iter().cloned()).collect();
+            callee.turbofish = Some(quote!(::<#(#resolved),*>));
+            callee.label = Some(label.clone());
+            callee.variant = variant;
+            match functions::shim(self.source, &item.attrs, &item.sig, &callee) {
+                Ok(shim) => {
+                    shims.push_str(&shim);
+                    self.report.generated("fn", &label);
+                }
+                Err(reason) => problems.push(reason),
+            }
+        }
+        if !shims.is_empty() {
+            self.edits.insert(self.source.end(item.block.brace_token.span.close()), shims);
+        }
+        if let Some(problem) = problems.first() {
+            let reason = format!("generic, and not every instantiation can be called: {problem}");
+            self.report.skipped("fn", &name, &reason);
+        } else if uses.is_empty() {
+            self.report.skipped("fn", &name, "generic, and the crate never calls it with concrete types");
+        }
+    }
+
+    /// Whether MIR's arguments come from inside generic code - a bare name such as `T` that is no
+    /// type the crate or std defines - rather than from a concrete call.
+    fn inside_generic_code(&self, args: &[String]) -> bool {
+        args.iter().any(|arg| {
+            arg.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                && self.cx.index.resolve(arg, &self.module, self.cx.crate_name).is_err()
+        })
+    }
+
+    /// MIR's type arguments resolved from this module, or the first that cannot be.
+    fn resolve_all(&self, args: &[String], expected: usize) -> Result<Vec<Type>, String> {
+        if args.len() != expected {
+            return Err(format!("expected {expected} type arguments, MIR has {}", args.len()));
+        }
+        args.iter().map(|arg| self.cx.index.resolve(arg, &self.module, self.cx.crate_name)).collect()
+    }
+
+    /// The instantiations of a generic `impl` block to give shims: each list of type arguments for
+    /// `Self` that the crate calls one of the block's methods with - which proves the block's
+    /// bounds hold - with the methods called that way. Returns the impl's parameters in the order
+    /// `Self` takes them.
+    fn impl_instantiations(&self, item: &ItemImpl) -> Result<(Vec<String>, Vec<Instance>), String> {
+        if item.generics.lifetimes().next().is_some() || item.generics.const_params().next().is_some() {
+            return Err("the impl has lifetime or const parameters".into());
+        }
+        let shape = "the impl is for a specific shape of its type";
+        let Type::Path(self_path) = &*item.self_ty else { return Err("its type is not a plain path".into()) };
+        let last = self_path.path.segments.last().ok_or("its type has no name")?;
+        let syn::PathArguments::AngleBracketed(written) = &last.arguments else { return Err(shape.into()) };
+        // `impl<K, V> Cache<K, V>`: each argument must be one of the impl's parameters, once.
+        let mut params = Vec::new();
+        for arg in &written.args {
+            match arg {
+                syn::GenericArgument::Type(Type::Path(path)) if path.qself.is_none() => match path.path.get_ident() {
+                    Some(ident) => params.push(ident.to_string()),
+                    None => return Err(shape.into()),
+                },
+                _ => return Err(shape.into()),
+            }
+        }
+        let declared: HashSet<String> = item.generics.type_params().map(|param| param.ident.to_string()).collect();
+        let written_set: HashSet<String> = params.iter().cloned().collect();
+        if written_set.len() != params.len() || written_set != declared {
+            return Err(shape.into());
+        }
+
+        let type_name = last.ident.to_string();
+        let type_module = self.cx.index.module_of(&type_name, &self.module).unwrap_or_else(|| self.module.clone());
+        let methods: HashSet<String> = item
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                syn::ImplItem::Fn(method) => Some(method.sig.ident.to_string()),
+                _ => None,
+            })
+            .collect();
+        let mut found: Vec<Instance> = Vec::new();
+        for use_ in self.cx.uses.get(&type_name).into_iter().flatten() {
+            let Some(method) = &use_.method else { continue };
+            if !methods.contains(method) || !generics::qualifies(&use_.qualifier, &type_module, self.cx.crate_name) {
+                continue;
+            }
+            let args = type_args(&use_.args);
+            if self.inside_generic_code(&args) {
+                continue;
+            }
+            match found.iter_mut().find(|instance| instance.args == args) {
+                Some(instance) => {
+                    instance.called.insert(method.clone());
+                }
+                None => found.push(Instance { args, called: HashSet::from([method.clone()]) }),
+            }
+        }
+        found.sort_by(|a, b| a.args.cmp(&b.args));
+        Ok((params, found))
+    }
+
+    /// Shims for the functions of a module-level `impl` block, all placed after its closing brace:
+    /// once for a plain block, once per instantiation for a generic one.
     fn impl_shims(&mut self, item: &ItemImpl) {
-        let self_name = functions::compact(&item.self_ty);
-        let trait_path = match &item.trait_ {
-            Some((Some(_), _, _)) => return,
-            Some((None, path, _)) => Some(path),
-            None => None,
+        if matches!(&item.trait_, Some((Some(_), _, _))) {
+            return;
+        }
+        let label = match &item.trait_ {
+            Some((_, path, _)) => format!("{} for {}", functions::compact(path), functions::compact(&item.self_ty)),
+            None => functions::compact(&item.self_ty),
         };
-        let label = match trait_path {
-            Some(path) => format!("{} for {self_name}", functions::compact(path)),
-            None => self_name.clone(),
-        };
-        let reason = functions::impl_skip_reason(&item.generics, &item.self_ty)
+        let has_methods = item.items.iter().any(|item| matches!(item, syn::ImplItem::Fn(_)));
+        let reason = functions::impl_skip_reason(&item.self_ty)
             .map(str::to_owned)
             .or_else(|| item.unsafety.map(|_| "it is an unsafe impl".to_owned()))
             .or_else(|| {
@@ -283,20 +429,99 @@ impl Generator<'_> {
                     .map(|attribute| format!("its #[{attribute}] attribute may rewrite it"))
             });
         if let Some(reason) = reason {
-            if item.items.iter().any(|item| matches!(item, syn::ImplItem::Fn(_))) {
+            if has_methods {
                 self.report.skipped("impl", &label, &format!("methods not callable: {reason}"));
             }
             return;
         }
+        if item.generics.params.is_empty() {
+            let shims = self.impl_block_shims(item, &HashMap::new(), None);
+            if !shims.is_empty() {
+                self.edits.insert(self.source.end(item.brace_token.span.close()), shims);
+            }
+            return;
+        }
+
+        let (params, found) = match self.impl_instantiations(item) {
+            Ok(result) => result,
+            Err(reason) => {
+                if has_methods {
+                    self.report.skipped("impl", &label, &format!("methods not callable: {reason}"));
+                }
+                return;
+            }
+        };
+        if found.is_empty() && has_methods {
+            self.report.skipped("impl", &label, "generic, and the crate never calls its methods with concrete types");
+        }
+        let mut shims = String::new();
+        for (variant, instance) in found.iter().enumerate() {
+            match self.resolve_all(&instance.args, params.len()) {
+                Ok(resolved) => {
+                    let subst: HashMap<String, Type> = params.iter().cloned().zip(resolved).collect();
+                    shims.push_str(&self.impl_block_shims(item, &subst, Some((instance, variant))));
+                }
+                Err(problem) => {
+                    let label = format!("{label} with <{}>", instance.args.join(", "));
+                    self.report.skipped("impl", &label, &problem);
+                }
+            }
+        }
+        if !shims.is_empty() {
+            self.edits.insert(self.source.end(item.brace_token.span.close()), shims);
+        }
+    }
+
+    /// The shims for the methods of one impl block, with the type arguments in `subst` for a
+    /// generic one.
+    fn impl_block_shims(
+        &mut self,
+        item: &ItemImpl,
+        subst: &HashMap<String, Type>,
+        instance: Option<(&Instance, usize)>,
+    ) -> String {
+        let concrete_self = match functions::spell(&item.self_ty, None, subst) {
+            Ok(ty) => ty,
+            Err(reason) => {
+                self.report.skipped("impl", &functions::compact(&item.self_ty), &reason);
+                return String::new();
+            }
+        };
+        let concrete_trait = match &item.trait_ {
+            Some((_, path, _)) => {
+                let as_type: Type = syn::parse_quote!(#path);
+                match functions::spell(&as_type, None, subst) {
+                    Ok(Type::Path(path)) => Some(path.path),
+                    _ => return String::new(),
+                }
+            }
+            None => None,
+        };
+        // How the instantiation is listed: as MIR printed it, `Cache<u32, String>`.
+        let self_label = instance.map(|(instance, _)| {
+            let base = functions::compact(&item.self_ty);
+            format!("{}<{}>", base.split('<').next().unwrap_or(&base), instance.args.join(", "))
+        });
+        let self_name = self_label.clone().unwrap_or_else(|| functions::compact(&item.self_ty));
         let mut shims = String::new();
         for impl_item in &item.items {
             let syn::ImplItem::Fn(method) = impl_item else { continue };
             let name = format!("{self_name}::{}", method.sig.ident);
-            let callee = Callee {
-                self_ty: Some(&item.self_ty),
-                trait_path,
-                cfgs: functions::cfgs(item.attrs.iter().chain(&method.attrs)),
-            };
+            if let Some((instance, _)) = instance
+                && method.sig.generics.where_clause.is_some()
+                && !instance.called.contains(&method.sig.ident.to_string())
+            {
+                self.report.skipped("method", &name, "it has bounds of its own, and is not called with these types");
+                continue;
+            }
+            let mut callee = Callee::new(
+                Some(&concrete_self),
+                concrete_trait.as_ref(),
+                functions::cfgs(item.attrs.iter().chain(&method.attrs)),
+            );
+            callee.subst = subst.clone();
+            callee.label = self_label.clone();
+            callee.variant = instance.map_or(0, |(_, variant)| variant);
             match functions::shim(self.source, &method.attrs, &method.sig, &callee) {
                 Ok(shim) => {
                     shims.push_str(&shim);
@@ -305,9 +530,7 @@ impl Generator<'_> {
                 Err(reason) => self.report.skipped("method", &name, &reason),
             }
         }
-        if !shims.is_empty() {
-            self.edits.insert(self.source.end(item.brace_token.span.close()), shims);
-        }
+        shims
     }
 
     fn track_hook(&mut self, local: &Local) {
@@ -343,6 +566,17 @@ impl Generator<'_> {
         );
         self.report.generated("hook", &format!("{component}.{binding} ({hook})"));
     }
+}
+
+/// One instantiation of a generic impl block: its type arguments, and the methods called with them.
+struct Instance {
+    args: Vec<String>,
+    called: HashSet<String>,
+}
+
+/// The type arguments among MIR's generic arguments: lifetimes (`'_`) dropped.
+fn type_args(args: &[String]) -> Vec<String> {
+    args.iter().filter(|arg| !arg.starts_with('\'')).cloned().collect()
 }
 
 const TRAIT_METHODS: &str = " #[doc(hidden)] #[allow(dead_code)] \
@@ -749,15 +983,24 @@ mod tests {
 
     /// Rewrites one file the way the crate walk does, returning the text and the report.
     fn rewrite(text: &str, hooks: bool) -> (String, String) {
+        rewrite_with_mir(text, hooks, "")
+    }
+
+    /// The same, with `mir` as the crate's MIR dump.
+    fn rewrite_with_mir(text: &str, hooks: bool, mir: &str) -> (String, String) {
         let source = Source::new(text.to_owned());
         let syntax = syn::parse_file(text).unwrap();
         let mut report = Report::default();
         let mut traits = TraitCollector::default();
         traits.visit_file(&syntax);
         let dyn_traits = resolve_dyn_traits(&traits.traits, &mut report);
-        let cx = Context { dyn_traits: &dyn_traits, hooks, endpoint: None };
+        let mut index = Index::default();
+        index.add_file(&[], &syntax);
+        let uses = generics::scan(mir, &index.generic_names);
+        let cx =
+            Context { dyn_traits: &dyn_traits, hooks, endpoint: None, index: &index, uses: &uses, crate_name: "app" };
         let mut edits = Edits::default();
-        Generator::new(&source, &mut edits, &cx, &mut report, true).visit_file(&syntax);
+        Generator::new(&source, &mut edits, &cx, &mut report, true, Vec::new()).visit_file(&syntax);
         let out = edits.apply(text);
         assert_eq!(out.lines().count(), text.lines().count(), "lines moved:\n{out}");
         (out, report.lines.join("\n"))
@@ -852,14 +1095,14 @@ impl Default for S { fn default() -> Self { S } }
             );
         }
         for (skipped, reason) in [
-            ("fn generic", "it is generic"),
+            ("fn generic", "never calls it with concrete types"),
             ("fn later", "it is async"),
             ("fn takes_mut", "`&mut` argument"),
             ("fn takes_impl", "`impl Trait` argument"),
             ("fn card", "UI component"),
             ("fn App", "UI component"),
             ("fn wrapped", "#[tokio::main] attribute"),
-            ("impl Wrap<T>", "the impl is generic"),
+            ("impl Wrap<T>", "never calls its methods with concrete types"),
         ] {
             assert!(
                 report.lines().any(|line| line.contains(skipped) && line.contains(reason)),
@@ -880,5 +1123,51 @@ impl Default for S { fn default() -> Self { S } }
         assert!(methods.contains("RefProbe :: < str >"), "a named lifetime is dropped: {methods}");
         assert!(methods.contains("SelfProbe (this)"), "{methods}");
         assert!(methods.contains("Receiver :: Mut"), "{methods}");
+    }
+
+    #[test]
+    fn instantiates_generics_the_crate_calls() {
+        let text = "pub struct Item;
+mod hidden { struct Secret; }
+pub fn show<T: Clone>(value: &T, times: u32) -> u32 { times }
+pub fn never<T>(t: T) {}
+pub struct Cache<K, V> { k: K, v: V }
+impl<K: Clone, V> Cache<K, V> { pub fn get(&self, key: &K) -> Option<&V> { None } pub fn sum(&self) -> u8 where V: Copy { 0 } }
+impl<T> Cache<T, T> { fn same(&self) {} }
+";
+        let mir = "_1 = show::<Item>(copy _2, const 1_u32) -> [return: bb1];
+_3 = show::<Vec<String>>(copy _4, const 2_u32) -> [return: bb2];
+_5 = show::<hidden::Secret>(copy _6, const 3_u32) -> [return: bb3];
+_6 = show::<T>(copy _6, const 3_u32) -> [return: bb3];
+_7 = Cache::<u32, Item>::get(copy _8, copy _9) -> [return: bb4];
+let _9: Cache<u8, u8>;
+";
+        let (out, report) = rewrite_with_mir(text, false, mir);
+        for generated in ["+ fn show::<Item>", "+ fn show::<Vec<String>>", "+ method Cache<u32, Item>::get"] {
+            assert!(
+                report.contains(generated),
+                "{generated} missing:
+{report}"
+            );
+        }
+        for (skipped, reason) in [
+            ("fn show", "`hidden::Secret` cannot be named"),
+            ("fn never", "never calls it with concrete types"),
+            ("method Cache<u32, Item>::sum", "bounds of its own"),
+            ("impl Cache<T, T>", "specific shape"),
+        ] {
+            assert!(
+                report.lines().any(|line| line.contains(skipped) && line.contains(reason)),
+                "{skipped}:
+{report}"
+            );
+        }
+        let show = out.lines().find(|line| line.starts_with("pub fn show")).unwrap();
+        assert!(show.contains("show :: < crate :: Item >"), "{show}");
+        assert!(show.contains("RefProbe :: < crate :: Item >"), "T is replaced in parameters: {show}");
+        assert!(show.contains("show :: < Vec < String > >"), "{show}");
+        let cache = out.lines().find(|line| line.starts_with("impl<K: Clone, V>")).unwrap();
+        assert!(cache.contains("TypeId :: of :: < Cache < u32 , crate :: Item > >"), "{cache}");
+        assert!(cache.contains("RefProbe :: < u32 >"), "K is replaced: {cache}");
     }
 }

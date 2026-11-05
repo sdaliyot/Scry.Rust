@@ -113,13 +113,40 @@ format_cents(inv.total_value_cents())
 Callable means:
 - module-level functions, and methods and associated functions of module-level `impl` blocks
   (inherent or trait)
-- not generic
+- not generic, or generic and called by the crate with concrete types (see below)
 - not `async` or `unsafe`
 - no `&mut` or `impl Trait` parameters
 - not `main`, a test or a UI component
 
 Functions behind unknown attribute macros are skipped, because the macro may rewrite them.
 `scry-report.txt` lists every skipped function and why.
+
+Scripts call a value's methods with method syntax. When the type has its own method with the same
+name and argument count as one of a node's methods (`Cache::get(key)`, `Inventory::len()`), the
+app's method wins. `get(node.path())` still takes a snapshot.
+
+### Generic functions and types
+
+A generic function or impl gets one shim for each set of concrete types the crate itself calls it
+with. To find those, `cargo scry` has rustc compile the crate once more to MIR only (the stable
+`--emit=mir`) and reads the calls from it:
+
+```powershell
+scry fns describe                           # util::describe::<Item>, util::describe::<Stats>
+scry call ratio 1 4                         # the only instantiation answers to the plain name
+scry eval 'APP.labels.get(999)'             # Cache<u32, String>::get on the live cache
+```
+
+- An instantiation is listed with its type arguments, such as `describe::<Item>`. When there are
+  several, call it by that path.
+- Only calls count, because a call proves the types meet the function's bounds. For a generic
+  `impl`, a call to any of its methods covers the whole block, except methods with `where` bounds
+  of their own.
+- Each instantiation's type arguments must be nameable from the function's module: a crate type
+  visible there, a std type, or a primitive. Closures, and types private to another module, drop
+  that instantiation.
+- The extra MIR pass runs only for crates that have generic items. On the demo it adds about
+  2 seconds to a rebuild.
 
 ## What gets generated
 
@@ -147,8 +174,9 @@ with `not_writable`, because writing through a shared reference is undefined beh
 - Plain stack locals can't be reached. Only statics, and state reachable from them or from tracked hooks.
 - Types from other crates show as `Debug` text or a type name, except the std types and Dioxus signals `scry-rs` supports.
 - Types created by third-party macros (Dioxus props, `bitflags!`) aren't rewritten.
-- Generic functions and methods of generic types can't be called yet: choosing the type arguments
-  needs type information the generator doesn't have.
+- A generic function or type can only be called with type arguments the crate itself uses with
+  it. Instantiations that only appear inside other generic code, or that need a closure type, are
+  not found.
 - Called code runs on the registry's thread (the UI thread in a Dioxus app), and the script time limit
   doesn't stop native code. A function that blocks or loops blocks that thread. So does a method
   that locks a `Mutex` its own path already holds.

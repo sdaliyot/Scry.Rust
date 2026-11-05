@@ -18,13 +18,21 @@ pub fn derive_reflect(input: TokenStream) -> TokenStream {
 }
 
 fn expand(mut input: DeriveInput) -> syn::Result<Tokens> {
-    // A type with generic parameters may not be `'static`, so it gets neither `as_any` - and with
-    // it, callable methods - nor `FromValue`.
-    let concrete = input.generics.params.is_empty();
+    // `as_any` - and with it, callable methods - needs `Self: 'static`. A type with lifetime
+    // parameters never is; one with only type parameters is when they are, so its impl requires
+    // that. Everything reachable from a static or a signal is `'static` anyway.
+    let static_only = input.generics.lifetimes().next().is_none();
+    let mut from_generics = input.generics.clone();
+    for parameter in from_generics.type_params_mut() {
+        parameter.bounds.push(parse_quote!(::scry::__private::FromValue));
+    }
 
     // A field built from a type parameter is only navigable if the parameter is.
     for parameter in input.generics.type_params_mut() {
         parameter.bounds.push(parse_quote!(::scry::Reflect));
+        if static_only {
+            parameter.bounds.push(parse_quote!('static));
+        }
     }
 
     let body = match &input.data {
@@ -37,7 +45,8 @@ fn expand(mut input: DeriveInput) -> syn::Result<Tokens> {
 
     let name = &input.ident;
     let (impl_generics, type_generics, where_clause) = input.generics.split_for_impl();
-    let (as_any, from_value) = if concrete {
+    let (from_impl, from_type, from_where) = from_generics.split_for_impl();
+    let (as_any, from_value) = if static_only {
         let construct = match &input.data {
             Data::Struct(data) if !unsized_tail(&data.fields) => Some(construct_struct(&data.fields)),
             Data::Enum(data) => Some(construct_enum(data)),
@@ -47,7 +56,7 @@ fn expand(mut input: DeriveInput) -> syn::Result<Tokens> {
             quote! {
                 #[automatically_derived]
                 #[allow(unused_variables, unused_imports, unreachable_patterns, clippy::all)]
-                impl ::scry::__private::FromValue for #name {
+                impl #from_impl ::scry::__private::FromValue for #name #from_type #from_where {
                     fn from_value(value: &::scry::Value) -> ::core::result::Result<Self, ::scry::Error> {
                         use ::scry::__private::{ViaFromValue as _, ViaNoValue as _};
                         #construct

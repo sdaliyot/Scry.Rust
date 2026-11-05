@@ -15,11 +15,13 @@
 //! access. Anything else - numbers, strings, `None`, unit enum variants, opaque values - reads as a
 //! plain copy. So does a root without members (`DISCOUNTS_ENABLED`, `FILTER`): it is read when the
 //! script starts, and if the script assigns it (`FILTER = "Done"`) the value is written back when
-//! the script finishes without an error. Nodes have methods that never clash with field names, because fields are reached
-//! as properties and methods are called: `get()`, `get(depth)`, `set(value)`, `members()`,
-//! `children()`, `len()` (the type's own `len` method if it has one), `type_name()`, `kind()`,
-//! `path()`. Global `roots()`, `root(name)`,
-//! `get(path)`, `get(path, depth)` and `set(path, value)` mirror the other commands.
+//! the script finishes without an error.
+//!
+//! Nodes have methods that never clash with field names, because fields are reached as properties
+//! and methods are called: `get()`, `get(depth)`, `set(value)`, `members()`, `children()`,
+//! `len()`, `type_name()`, `kind()`, `path()`. When the value's type has a method of its own with
+//! the same name and argument count (`Cache::get(key)`, `Inventory::len()`), that one runs
+//! instead; `get(node.path())` still takes a snapshot.
 //!
 //! The app's own methods are called with method syntax on a node - `APP.inventory.total_value()`,
 //! `board.toggle(2)` - and its free functions by name when the name is unique (`ratio(3, 4)`).
@@ -132,18 +134,40 @@ fn engine(registry: &Rc<Registry>, printed: &Rc<RefCell<Vec<String>>>) -> Engine
     });
     engine.register_iterator::<Node>();
 
-    engine.register_fn("get", |node: Node| node.snapshot(crate::command::DEFAULT_DEPTH));
-    engine.register_fn("get", |node: Node, depth: INT| node.snapshot(depth.max(0) as usize));
-    engine.register_fn("set", |node: Node, value: Dynamic| node.assign(&value).map_err(raise));
-    engine.register_fn("members", |node: Node| -> Result<Array, Box<EvalAltResult>> {
-        let members = node.with(|value| value.members()).map_err(raise)?;
-        Ok(members.into_iter().map(|member| member.name.into()).collect())
+    // A type's own method of the same name and argument count wins over each of these.
+    engine.register_fn("get", |node: Node| {
+        node.own_or("get", &[], |node| node.with(|value| to_dynamic(&value.snapshot(crate::command::DEFAULT_DEPTH))))
     });
-    engine.register_fn("children", |node: Node| node.children().map_err(raise));
-    engine.register_fn("len", |node: Node| node.len().map_err(raise));
-    engine.register_fn("type_name", |node: Node| node.with(|value| value.type_name()).map_err(raise));
-    engine.register_fn("kind", |node: Node| node.with(|value| value.kind().as_str()).map_err(raise));
-    engine.register_fn("path", |node: Node| node.path());
+    engine.register_fn("get", |node: Node, arg: Dynamic| {
+        node.own_or("get", std::slice::from_ref(&arg), |node| {
+            let depth = arg
+                .as_int()
+                .map_err(|_| Error::Script(format!("get(depth) takes a number, not {}", arg.type_name())))?;
+            node.with(|value| to_dynamic(&value.snapshot(depth.max(0) as usize)))
+        })
+    });
+    engine.register_fn("set", |node: Node, value: Dynamic| {
+        node.own_or("set", std::slice::from_ref(&value), |node| node.assign(&value).map(|()| Dynamic::UNIT))
+    });
+    engine.register_fn("members", |node: Node| {
+        node.own_or("members", &[], |node| {
+            let members = node.with(|value| value.members())?;
+            Ok(members.into_iter().map(|member| Dynamic::from(member.name)).collect::<Array>().into())
+        })
+    });
+    engine.register_fn("children", |node: Node| {
+        node.own_or("children", &[], |node| node.children().map(Dynamic::from_array))
+    });
+    engine.register_fn("len", |node: Node| {
+        node.own_or("len", &[], |node| node.with(|value| (value.member_count() as INT).into()))
+    });
+    engine.register_fn("type_name", |node: Node| {
+        node.own_or("type_name", &[], |node| node.with(|value| value.type_name().into()))
+    });
+    engine.register_fn("kind", |node: Node| {
+        node.own_or("kind", &[], |node| node.with(|value| value.kind().as_str().into()))
+    });
+    engine.register_fn("path", |node: Node| node.own_or("path", &[], |node| Ok(node.path().into())));
     engine.register_fn("to_string", |node: Node| node.to_string());
     engine.register_fn("to_debug", |node: Node| node.to_string());
 
@@ -289,10 +313,6 @@ impl Node {
         })
     }
 
-    fn snapshot(self, depth: usize) -> Result<Dynamic, Box<EvalAltResult>> {
-        self.with(|value| to_dynamic(&value.snapshot(depth))).map_err(raise)
-    }
-
     fn children(&self) -> Result<Vec<Dynamic>, Error> {
         self.child_segments()?.into_iter().map(|segment| self.child(segment).value()).collect()
     }
@@ -306,12 +326,19 @@ impl Node {
         })
     }
 
-    /// The app's own `len()` when the type has one, else the number of members.
-    fn len(&self) -> Result<Dynamic, Error> {
-        match self.call("len", &[]) {
-            Err(Error::NoSuchMethod { .. }) => self.with(|value| (value.member_count() as INT).into()),
+    /// The type's own method `name` when it has one taking `args`, else `fallback` - one of the
+    /// methods every node has.
+    fn own_or(
+        &self,
+        name: &str,
+        args: &[Dynamic],
+        fallback: impl FnOnce(&Node) -> Result<Dynamic, Error>,
+    ) -> Result<Dynamic, Box<EvalAltResult>> {
+        match self.call(name, args) {
+            Err(Error::NoSuchMethod { .. } | Error::ArgumentCount { .. }) => fallback(self),
             result => result,
         }
+        .map_err(raise)
     }
 
     fn call(&self, method: &str, args: &[Dynamic]) -> Result<Dynamic, Error> {

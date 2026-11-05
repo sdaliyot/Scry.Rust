@@ -6,7 +6,7 @@
 //! under the package keep their relative layout in the mirror (`src/main.rs`); anything else goes
 //! under `_external/<drive>/...`.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
@@ -16,6 +16,7 @@ use crate::edits::{Edits, Source};
 use crate::generate::{
     Context, Generator, LaunchCollector, ModCollector, ModDecl, Report, TraitCollector, resolve_dyn_traits,
 };
+use crate::generics::{Index, scan};
 use crate::tokens::{self, Include};
 
 pub struct Output {
@@ -54,6 +55,8 @@ impl Paths<'_> {
 
 struct File {
     original: PathBuf,
+    /// The module path from the crate root (`["inventory"]`).
+    module: Vec<String>,
     source: Source,
     syntax: syn::File,
     mods: Vec<(ModDecl, Option<PathBuf>)>,
@@ -66,9 +69,17 @@ pub struct Options {
     pub dioxus: bool,
     /// It is an executable with a `main` to start the endpoint from.
     pub executable: bool,
+    pub crate_name: String,
 }
 
-pub fn rewrite_crate(root: &Path, paths: &Paths<'_>, options: &Options) -> Result<Output, String> {
+/// Rewrites the crate at `root`. `mir` compiles the original sources to a MIR dump, run only when
+/// the crate has generic functions or types whose instantiations matter.
+pub fn rewrite_crate(
+    root: &Path,
+    paths: &Paths<'_>,
+    options: &Options,
+    mir: &dyn Fn() -> Result<String, String>,
+) -> Result<Output, String> {
     let files = load(root, paths)?;
 
     let mut report = Report::default();
@@ -79,10 +90,29 @@ pub fn rewrite_crate(root: &Path, paths: &Paths<'_>, options: &Options) -> Resul
     let dyn_traits = resolve_dyn_traits(&traits.traits, &mut report);
     let mut launches = LaunchCollector::default();
     launches.visit_file(&files[0].syntax);
+
+    let mut index = Index::default();
+    for file in &files {
+        index.add_file(&file.module, &file.syntax);
+    }
+    let uses = if index.generic_names.is_empty() {
+        HashMap::new()
+    } else {
+        match mir() {
+            Ok(text) => scan(&text, &index.generic_names),
+            Err(error) => {
+                report.lines.push(format!("generic instantiations: not found, {error}"));
+                HashMap::new()
+            }
+        }
+    };
     let cx = Context {
         dyn_traits: &dyn_traits,
         hooks: options.dioxus,
         endpoint: options.executable.then_some(&launches.roots),
+        index: &index,
+        uses: &uses,
+        crate_name: &options.crate_name,
     };
 
     let _ = fs::remove_dir_all(paths.mirror_root);
@@ -90,7 +120,8 @@ pub fn rewrite_crate(root: &Path, paths: &Paths<'_>, options: &Options) -> Resul
     for (index, file) in files.iter().enumerate() {
         report.lines.push(format!("{}", file.original.display()));
         let mut edits = Edits::default();
-        Generator::new(&file.source, &mut edits, &cx, &mut report, index == 0).visit_file(&file.syntax);
+        Generator::new(&file.source, &mut edits, &cx, &mut report, index == 0, file.module.clone())
+            .visit_file(&file.syntax);
 
         for (decl, child) in &file.mods {
             let Some(child) = child else { continue };
@@ -140,9 +171,9 @@ pub fn rewrite_crate(root: &Path, paths: &Paths<'_>, options: &Options) -> Resul
 /// Reads and parses the module tree, plus files a build script generated that the crate includes.
 fn load(root: &Path, paths: &Paths<'_>) -> Result<Vec<File>, String> {
     let mut files = Vec::new();
-    let mut queue = VecDeque::from([(root.to_path_buf(), true)]);
+    let mut queue = VecDeque::from([(root.to_path_buf(), true, Vec::new())]);
     let mut seen = HashSet::new();
-    while let Some((path, mod_rs)) = queue.pop_front() {
+    while let Some((path, mod_rs, module)) = queue.pop_front() {
         if !seen.insert(path.clone()) {
             continue;
         }
@@ -161,7 +192,10 @@ fn load(root: &Path, paths: &Paths<'_>) -> Result<Vec<File>, String> {
             .map(|decl| {
                 let child = resolve_mod(&path, mod_rs, &decl);
                 if let Some((child, child_mod_rs)) = &child {
-                    queue.push_back((child.clone(), *child_mod_rs));
+                    let mut child_module = module.clone();
+                    child_module.extend(decl.inline_path.iter().cloned());
+                    child_module.push(decl.name.clone());
+                    queue.push_back((child.clone(), *child_mod_rs, child_module));
                 }
                 (decl, child.map(|(child, _)| child))
             })
@@ -171,12 +205,13 @@ fn load(root: &Path, paths: &Paths<'_>) -> Result<Vec<File>, String> {
         if let Some(out_dir) = paths.out_dir {
             for include in &includes {
                 if let Include::BuildOutput { file, .. } = include {
-                    queue.push_back((out_dir.join(file), false));
+                    // An included file's items land in the including module.
+                    queue.push_back((out_dir.join(file), false, module.clone()));
                 }
             }
         }
 
-        files.push(File { original: path, source, syntax, mods, includes });
+        files.push(File { original: path, module, source, syntax, mods, includes });
     }
     Ok(files)
 }

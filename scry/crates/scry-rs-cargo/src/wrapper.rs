@@ -108,7 +108,7 @@ pub fn run(rustc: OsString, args: Vec<OsString>) -> u8 {
     if !invocation.opted_in() {
         return exec(&rustc, &invocation.args);
     }
-    match rewritten(&invocation) {
+    match rewritten(&rustc, &invocation) {
         Ok((args, dep_info, mappings)) => {
             let code = exec(&rustc, &args);
             if code == 0
@@ -129,7 +129,7 @@ pub fn run(rustc: OsString, args: Vec<OsString>) -> u8 {
 
 type Rewritten = (Vec<String>, Option<PathBuf>, Vec<(String, String)>);
 
-fn rewritten(invocation: &Invocation) -> Result<Rewritten, String> {
+fn rewritten(rustc: &OsString, invocation: &Invocation) -> Result<Rewritten, String> {
     let cwd = env::current_dir().map_err(|error| error.to_string())?;
     let source_index = invocation.source.ok_or("no source file")?;
     let root = normalize(&cwd.join(&invocation.args[source_index]));
@@ -145,12 +145,15 @@ fn rewritten(invocation: &Invocation) -> Result<Rewritten, String> {
 
     let paths = Paths { manifest_dir: &manifest_dir, mirror_root: &mirror_root, out_dir: build_out_dir.as_deref() };
     let options = Options {
+        crate_name: crate_name.to_owned(),
         dioxus: invocation.has_extern("dioxus"),
         // A test harness supplies its own `main`.
         executable: invocation.values("--crate-type").any(|kind| kind == "bin")
             && !invocation.args.iter().any(|arg| arg == "--test"),
     };
-    let output = rewrite_crate(&root, &paths, &options)?;
+    let mir_path = mirror_root.with_extension("mir");
+    let mir = || mir_dump(rustc, invocation, &mir_path);
+    let output = rewrite_crate(&root, &paths, &options, &mir)?;
 
     // Later mappings win in rustc, so the more specific `_external` ones come last.
     let mut mappings = vec![(mirror_root.display().to_string(), manifest_dir.display().to_string())];
@@ -172,6 +175,42 @@ fn rewritten(invocation: &Invocation) -> Result<Rewritten, String> {
         })
     });
     Ok((args, dep_info, mappings))
+}
+
+/// Compiles the original sources once more, to MIR only, for the generic instantiations they use.
+/// The same arguments as the real build, minus its outputs and incremental state, without
+/// optimizations (MIR inlining would hide calls), and with lints and diagnostics silenced.
+fn mir_dump(rustc: &OsString, invocation: &Invocation, path: &Path) -> Result<String, String> {
+    let mut args = Vec::new();
+    let mut index = 0;
+    while index < invocation.args.len() {
+        let arg = &invocation.args[index];
+        let value = invocation.args.get(index + 1).map(String::as_str).unwrap_or("");
+        let dropped_pair = matches!(arg.as_str(), "--emit" | "-o" | "--out-dir" | "--error-format" | "--json")
+            || matches!(arg.as_str(), "-C" | "--codegen")
+                && (value.starts_with("incremental=") || value.starts_with("opt-level="));
+        if dropped_pair {
+            index += 2;
+            continue;
+        }
+        let dropped =
+            ["--emit=", "-o", "--out-dir=", "--error-format=", "--json="].iter().any(|flag| arg.starts_with(flag))
+                || arg.starts_with("-Cincremental=")
+                || arg.starts_with("-Copt-level=");
+        if !dropped {
+            args.push(arg.clone());
+        }
+        index += 1;
+    }
+    args.push(format!("--emit=mir={}", path.display()));
+    args.extend(["-C".into(), "opt-level=0".into(), "--cap-lints=allow".into()]);
+    let output = Command::new(rustc).args(&args).output().map_err(|error| error.to_string())?;
+    if !output.status.success() {
+        return Err("the crate does not compile as written".into());
+    }
+    let text = fs::read_to_string(path).map_err(|error| format!("{}: {error}", path.display()))?;
+    let _ = fs::remove_file(path);
+    Ok(text)
 }
 
 fn exec(rustc: &OsString, args: &[String]) -> u8 {
