@@ -177,6 +177,39 @@ scry hook remove 1
 - **Capturing never disturbs the function.** A busy lock shows as `<locked: ...>` rather than being
   waited for, a failed capture is only counted, and calls made while capturing aren't recorded.
 
+### Changing calls
+
+A hook can also change the calls it sees. Use this for fault injection ("make the next sale fail"),
+for stubbing a slow dependency, or for steering the app into a state that's hard to reach:
+
+```powershell
+scry hook before 1 'if args.index == 0 { #{ args: #{ index: 4 } } }'   # change an argument
+scry hook before 2 '#{ result: () }'                                    # skip the body, return ()
+scry hook after 3 'if args.id == 7 { #{ result: #{ Err: "injected" } } }'   # replace the result
+scry hook before 1                                                      # an empty script removes it
+```
+
+- **When scripts run:** a `before` script runs on the calling thread before the body, with `args`
+  and `instance`. It returns `()` for no change, or a map with `args`, `instance` (the `&mut self`
+  receiver) or `result`; a `result` skips the body and is returned instead. An `after` script also
+  sees `result`, and can return `#{ result: v }` to replace it.
+- **What can change:**
+  - By-value and `&mut` arguments, and a `&mut self` receiver, are written the way `set` writes:
+    a struct takes the fields to change.
+  - `&T` arguments can't be changed. Writing through a shared reference would be undefined
+    behaviour.
+  - A result is built from JSON when its type allows (`{"Ok": ..}`/`{"Err": ..}` for a `Result`).
+    Otherwise it's written into the real result.
+- **Records:** each changed call is recorded with `changes`, and `skipped: true` when the body was
+  skipped.
+- **Failures:** a change that fails (a type mismatch, or a script error or panic) leaves the call as
+  it was. It is recorded in `changeErrors` and counted in `changeFailures`.
+- **Limits:** scripts stop after 100,000 operations, because the app's own thread waits for them.
+  They're compiled once per thread, so the first changed call on a thread takes a few
+  milliseconds.
+- **Marking:** a hook with change scripts is marked `intervenes` in `hooks`, and its summary shows
+  the scripts. Treat it like `set`: it changes the app.
+
 Hooks are on by default. A crate can turn them off, or exclude hot or sensitive functions, in its
 `Cargo.toml` (`[workspace.metadata.scry.hooks]` sets the same keys for a whole workspace):
 

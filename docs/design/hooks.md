@@ -1,8 +1,8 @@
 # Design: method hooks for Scry.Rust
 
-Status: phase 1 (observing calls, and the `Cargo.toml` configuration) is implemented. Changing
-calls is still a proposal. Where the implementation differs from the plan below, the notes in
-"As built" say how.
+Status: implemented. That covers phase 1 (observing calls, and the `Cargo.toml` configuration) and
+phase 2 (changing calls). Where the implementation differs from the plan below, the notes in "As
+built" say how.
 
 ## As built
 
@@ -26,6 +26,20 @@ calls is still a proposal. Where the implementation differs from the plan below,
     hook point, and that lint is now allowed there.
 - **Cost of an inactive hook point:** within the noise of a 4 ns/call benchmark loop in a release
   build, so a fraction of a nanosecond.
+- **Changing calls (phase 2):**
+  - **Commands:** `hook before <id> <rhai>` and `hook after <id> <rhai>` attach scripts to an
+    existing hook, and an empty script removes one. Scripts are checked when attached, so a syntax
+    error is refused up front.
+  - **Return values:** a before script returns `#{ args, instance, result }`; an after script
+    returns `#{ result }`.
+  - **Where they run:** on the calling thread, compiled once per thread, and stopped after 100,000
+    operations.
+  - **Records** carry `changes`, `skipped` and `changeErrors`; hooks count `changeFailures`, and
+    those with scripts are marked `intervenes`.
+  - **Writing arguments:** by-value parameters are rebound as `mut` so they can be written. `&T`
+    parameters and by-value `self` are never offered for writing.
+  - **Building a replacement:** `FromValue` is tried first; if that fails, the value is written into
+    the existing result. `FromValue` for `Result` was added for `#{ Err: .. }`.
 - **Config changes rebuild:** the manifests read for `[package.metadata.scry]` are added to the
   build's dependency file, so editing `exclude` rebuilds the crate. Cargo ignores metadata changes
   otherwise.
@@ -281,5 +295,5 @@ that holds a long-lived connection, which is where Scry.NET uses them most.
 
 1. Instrument every hookable function by default. Turning hooks off, or excluding functions, is set
    in `Cargo.toml` (above), not an environment variable.
-2. Capture snapshots at call time. Changing arguments and results is a second phase (above).
+2. Capture snapshots at call time. Changing arguments and results was built as a second phase.
 3. Hooks expire after 30 minutes without a `read` or `wait`. No sessions for now.

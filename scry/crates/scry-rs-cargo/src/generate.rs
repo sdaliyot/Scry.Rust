@@ -1276,7 +1276,7 @@ pub async fn fetch(id: u32) -> Result<u32, String> {
     Ok(id)
 }
 struct S;
-impl S { fn get(&mut self, (a, b): (u8, u8)) -> &mut S { self } }
+impl S { fn get(&mut self, (a, b): (u8, u8), seen: &u8, out: &mut u8) -> &mut S { self } }
 impl Clone for S { fn clone(&self) -> Self { S } }
 const fn fixed() -> u8 { 1 }
 fn never() -> ! { loop {} }
@@ -1298,12 +1298,25 @@ fn main() {}
         assert!(lines[0].contains(r#""::ratio""#) && lines[0].contains("run_once(move || -> f64 {"), "{}", lines[0]);
         assert!(lines[0].contains(r#"__scry_capture . arg ("a""#), "{}", lines[0]);
         assert_eq!(lines[1], "    a as f64 / b as f64", "the body's own lines are untouched");
-        assert!(lines[2].starts_with(" }); # [allow"), "{}", lines[2]);
-        assert!(lines[3].contains("let __scry_result: Result < u32 , String > = async move {"), "{}", lines[3]);
-        assert!(lines[5].contains("}.await;"), "{}", lines[5]);
+        assert!(lines[2].starts_with(" }), }; # [allow"), "{}", lines[2]);
+        assert!(lines[0].contains("let mut a = a ;"), "a by-value parameter is rebound to be changeable");
+        assert!(lines[0].contains(r#"__scry_changes . arg ("a")"#), "{}", lines[0]);
+        assert!(lines[0].contains("let mut __scry_result: f64 = match __scry_skip {"), "{}", lines[0]);
+        assert!(lines[2].contains("__scry_c . after"), "{}", lines[2]);
+        assert!(
+            lines[3].contains("let mut __scry_result: Result < u32 , String > = match __scry_skip {"),
+            "{}",
+            lines[3]
+        );
+        assert!(lines[3].contains("=> async move {"), "{}", lines[3]);
+        assert!(lines[5].contains("}.await, };"), "{}", lines[5]);
         let method = lines[7];
         assert!(method.contains(r#""::S::get""#) && method.contains("__scry_capture . this"), "{method}");
         assert!(!method.contains(r#"arg ("a""#), "a destructured parameter is not captured: {method}");
+        assert!(method.contains(r#"__scry_changes . arg ("out")"#), "a &mut parameter can be changed: {method}");
+        assert!(!method.contains(r#"__scry_changes . arg ("seen")"#), "a &T parameter cannot: {method}");
+        assert!(method.contains("ProbeMut :: new (& mut * self)"), "a &mut self receiver can be changed: {method}");
+        assert!(method.contains("let mut out = out ;"), "a &mut parameter is rebound too: {method}");
         assert!(lines[8].contains(r#""::<S as Clone>::clone""#), "{}", lines[8]);
     }
 }

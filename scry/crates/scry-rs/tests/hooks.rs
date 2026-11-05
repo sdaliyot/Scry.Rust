@@ -9,22 +9,54 @@ use std::time::{Duration, Instant};
 
 use scry::__private::HookSite;
 #[allow(unused_imports)] // the generated code imports every probe; which one resolves depends on the types
-use scry::__private::{ViaDebug as _, ViaOpaque as _, ViaReflect as _};
+use scry::__private::{
+    ViaDebug as _, ViaFromValue as _, ViaNoValue as _, ViaOpaque as _, ViaOtherMut as _, ViaReflect as _,
+    ViaReflectMut as _,
+};
 use scry::{Reflect, Registry, execute};
 use serde_json::{Value, json};
 
-/// A function with a hook point, written the way the generator writes one.
+/// A function with a hook point, written the way the generator writes one. Every parameter is
+/// offered for changing here; the generator leaves out `&T` ones.
 macro_rules! hooked {
     (fn $name:ident($($arg:ident: $ty:ty),*) -> $ret:ty $body:block) => {
+        #[allow(unused_mut)]
         fn $name($($arg: $ty),*) -> $ret {
             static SITE: HookSite = HookSite::new(concat!("hooks::", stringify!($name)), stringify!(fn $name));
             #[scry::__private::linkme::distributed_slice(scry::__private::HOOK_SITES)]
             #[linkme(crate = scry::__private::linkme)]
             static REGISTERED: &HookSite = &SITE;
-            let call = SITE.enter(|capture| {
+            let mut call = SITE.enter(|capture| {
                 $(capture.arg(stringify!($arg), (&&&scry::__private::Probe(&$arg)).scry_ref());)*
             });
-            let result: $ret = scry::__private::run_once(move || -> $ret { $body });
+            $(let mut $arg = $arg;)*
+            let skip: Option<$ret> = match &mut call {
+                Some(c) => match c.before() {
+                    Some(changes) => {
+                        $(if let Some(value) = changes.arg(stringify!($arg)) {
+                            c.change(stringify!($arg), (&&&scry::__private::ProbeMut::new(&mut $arg)).scry_mut(), value);
+                        })*
+                        match changes.result() {
+                            Some(value) => c.skip(value, (&&&scry::__private::ArgProbe::<$ret>::new()).scry_arg(value)),
+                            None => None,
+                        }
+                    }
+                    None => None,
+                },
+                None => None,
+            };
+            let mut result: $ret = match skip {
+                Some(skipped) => skipped,
+                None => scry::__private::run_once(move || -> $ret { $body }),
+            };
+            if let Some(c) = &mut call {
+                if let Some(value) = c.after((&&&scry::__private::Probe(&result)).scry_ref()) {
+                    match c.replace(&value, (&&&scry::__private::ArgProbe::<$ret>::new()).scry_arg(&value)) {
+                        Some(replacement) => result = replacement,
+                        None => c.change("result", (&&&scry::__private::ProbeMut::new(&mut result)).scry_mut(), &value),
+                    }
+                }
+            }
             if let Some(call) = call {
                 call.exit((&&&scry::__private::Probe(&result)).scry_ref());
             }
@@ -203,4 +235,89 @@ fn scripts_add_and_read_hooks() {
     let read = run(&format!("eval let page = hook_read({id}); page.calls[0].result"));
     assert_eq!(read, json!(8));
     assert_eq!(run(&format!("eval hook_remove({id}).calls")), json!(1));
+}
+
+#[derive(Reflect, Debug, PartialEq)]
+struct Quote {
+    price: u32,
+    note: String,
+}
+
+hooked!(
+    fn price(base: u32, quote: Quote) -> Result<Quote, String> {
+        if base == 0 {
+            return Err("free".into());
+        }
+        Ok(Quote { price: base + quote.price, note: quote.note })
+    }
+);
+
+hooked!(
+    fn stamp(count: u32) -> Quote {
+        Quote { price: count, note: "real".into() }
+    }
+);
+
+hooked!(
+    fn discount(base: u32, quote: Quote) -> Result<Quote, String> {
+        Ok(Quote { price: base + quote.price, note: quote.note })
+    }
+);
+
+hooked!(
+    fn tally(count: u32) -> Quote {
+        Quote { price: count, note: "real".into() }
+    }
+);
+
+#[test]
+fn a_before_script_changes_arguments() {
+    let id = add("hooks::price", "");
+    run(&format!(r#"hook before {id} #{{ args: #{{ base: args.base * 10, quote: #{{ note: "changed" }} }} }}"#));
+    let quote = price(2, Quote { price: 1, note: "kept?".into() }).unwrap();
+    assert_eq!(quote, Quote { price: 21, note: "changed".into() });
+    let call = run(&format!("hook read {id}"))["calls"][0].clone();
+    assert_eq!(call["args"]["base"], json!(2), "the record keeps the arguments as they came in: {call}");
+    assert_eq!(call["changes"]["base"], json!(20));
+    assert_eq!(run("hooks hooks::price")[0]["intervenes"], json!(true));
+
+    run(&format!("hook before {id}"));
+    assert_eq!(price(2, Quote { price: 1, note: "n".into() }).unwrap().price, 3, "an empty script removes it");
+}
+
+#[test]
+fn a_before_script_can_skip_the_body() {
+    let id = add("hooks::stamp", "");
+    run(&format!(r#"hook before {id} if args.count > 5 {{ #{{ result: #{{ price: 0, note: "skipped" }} }} }}"#));
+    assert_eq!(stamp(9), Quote { price: 0, note: "skipped".into() });
+    assert_eq!(stamp(1), Quote { price: 1, note: "real".into() }, "the script returned () for this call");
+    let calls = run(&format!("hook read {id}"))["calls"].clone();
+    assert_eq!(calls[0]["skipped"], json!(true));
+    assert_eq!(calls[0]["result"]["note"], json!("skipped"));
+    assert_eq!(calls[1]["skipped"], json!(null));
+}
+
+#[test]
+fn an_after_script_replaces_the_result() {
+    let id = add("hooks::discount", "");
+    run(&format!(r#"hook after {id} if args.base == 7 {{ #{{ result: #{{ Err: "injected" }} }} }}"#));
+    assert_eq!(discount(7, Quote { price: 1, note: "n".into() }), Err("injected".into()));
+    assert!(discount(8, Quote { price: 1, note: "n".into() }).is_ok());
+    run(&format!("hook remove {id}"));
+}
+
+#[test]
+fn a_failing_change_leaves_the_call_alone_and_is_recorded() {
+    let id = add("hooks::tally", "");
+    run(&format!(r#"hook before {id} #{{ args: #{{ count: "not a number" }} }}"#));
+    assert_eq!(tally(3).price, 3);
+    run(&format!(r#"hook before {id} throw "broken""#));
+    assert_eq!(tally(4).price, 4);
+    let page = run(&format!("hook read {id}"));
+    assert!(page["calls"][0]["changeErrors"][0].as_str().unwrap().starts_with("count:"), "{page}");
+    assert!(page["calls"][1]["changeErrors"][0].as_str().unwrap().contains("broken"), "{page}");
+    assert_eq!(page["changeFailures"], json!(2));
+    let bad = execute(&Registry::new(), &format!("hook before {id} let x = ;"));
+    assert_eq!(bad["error"]["code"], json!("script_error"), "a script that does not compile is refused up front");
+    run(&format!("hook remove {id}"));
 }

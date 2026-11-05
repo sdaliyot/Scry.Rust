@@ -404,6 +404,56 @@ fn member_segment(name: String) -> Segment {
     }
 }
 
+/// How many operations a change script may take. It runs on the app's own thread, inside the hooked
+/// call, so it has to be short.
+const CHANGE_OPERATIONS: u64 = 100_000;
+
+thread_local! {
+    /// Compiled change scripts, per thread: an engine is not `Send`, and a hooked function runs on
+    /// whatever thread calls it.
+    static CHANGE_SCRIPTS: RefCell<std::collections::HashMap<String, Rc<(Engine, rhai::AST)>>> = RefCell::default();
+}
+
+fn change_engine() -> Engine {
+    let mut engine = Engine::new();
+    engine.set_module_resolver(DummyModuleResolver::new());
+    engine.set_max_operations(CHANGE_OPERATIONS);
+    engine.set_max_string_size(1 << 20);
+    engine.set_max_array_size(100_000);
+    engine.set_max_map_size(100_000);
+    engine
+}
+
+/// Whether `script` compiles as a `hook before`/`hook after` script.
+pub(crate) fn check_change(script: &str) -> Result<(), Error> {
+    change_engine().compile(script).map(|_| ()).map_err(|error| Error::Script(error.to_string()))
+}
+
+/// Runs a change script with `input`'s fields as its variables, and returns what it evaluated to.
+pub(crate) fn change(script: &str, input: serde_json::Map<String, Value>) -> Result<Value, Error> {
+    let compiled = CHANGE_SCRIPTS.with(|scripts| -> Result<Rc<(Engine, rhai::AST)>, Error> {
+        let mut scripts = scripts.borrow_mut();
+        if let Some(compiled) = scripts.get(script) {
+            return Ok(Rc::clone(compiled));
+        }
+        let engine = change_engine();
+        let ast = engine.compile(script).map_err(|error| Error::Script(error.to_string()))?;
+        if scripts.len() >= 64 {
+            scripts.clear();
+        }
+        let compiled = Rc::new((engine, ast));
+        scripts.insert(script.to_owned(), Rc::clone(&compiled));
+        Ok(compiled)
+    })?;
+    let (engine, ast) = &*compiled;
+    let mut scope = Scope::new();
+    for (name, value) in &input {
+        scope.push(name.clone(), to_dynamic(value));
+    }
+    let result = engine.eval_ast_with_scope::<Dynamic>(&mut scope, ast).map_err(|error| failure(&error))?;
+    to_json(&result, ASSIGN_DEPTH)
+}
+
 /// An engine for `hook wait` predicates: no access to the app, only to the recorded call.
 pub(crate) fn predicate_engine() -> Engine {
     let mut engine = Engine::new();

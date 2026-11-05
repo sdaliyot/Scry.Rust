@@ -92,6 +92,20 @@ impl<T: FromValue> FromValue for Option<T> {
     }
 }
 
+/// `{"Ok": value}` or `{"Err": error}`, the way a `Result` snapshot shows it.
+impl<T: FromValue, E: FromValue> FromValue for Result<T, E> {
+    fn from_value(value: &Value) -> Result<Self, Error> {
+        let expected = "{\"Ok\": ..} or {\"Err\": ..}";
+        let object =
+            value.as_object().filter(|object| object.len() == 1).ok_or_else(|| Error::mismatch(expected, value))?;
+        match object.iter().next() {
+            Some((key, inner)) if key == "Ok" => T::from_value(inner).map(Ok),
+            Some((key, inner)) if key == "Err" => E::from_value(inner).map(Err),
+            _ => Err(Error::mismatch(expected, value)),
+        }
+    }
+}
+
 impl<T: FromValue> FromValue for Box<T> {
     fn from_value(value: &Value) -> Result<Self, Error> {
         T::from_value(value).map(Box::new)

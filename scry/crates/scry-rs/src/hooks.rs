@@ -17,6 +17,14 @@
 //!
 //! The commands run without the registry: records are JSON, so the endpoint answers them on the
 //! connection's thread, and a long `hook wait` never occupies the registry's (or a UI) thread.
+//!
+//! A hook can also change calls (`hook before`, `hook after`): a Rhai script run on the calling
+//! thread, before the body with the arguments, or after it with the result too, returns what to
+//! change - `#{ args: #{ index: 2 } }`, `#{ instance: #{ .. } }`, or `#{ result: v }`, which before
+//! the body means "skip it and return `v`". By-value and `&mut` arguments and a `&mut self`
+//! receiver can be changed, written the way `set` writes; a result is built from JSON where its
+//! type allows, and written into otherwise. Anything that fails leaves the call as it was, and is
+//! recorded with the call.
 
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
@@ -28,7 +36,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Map, Value, json};
 
-use crate::__private::FieldRef;
+use crate::__private::{FieldMut, FieldRef};
 use crate::Error;
 
 const DEFAULT_DEPTH: usize = 2;
@@ -75,8 +83,14 @@ impl HookSite {
         if !captured {
             hook.capture_failures.fetch_add(1, Ordering::Relaxed);
         }
+        let (before, after) = hook.scripts();
         Some(CallGuard {
             hook,
+            before,
+            after,
+            changes: Map::new(),
+            change_errors: Vec::new(),
+            skipped: false,
             start: Instant::now(),
             started_at: now_millis(),
             thread: thread_label(),
@@ -112,6 +126,13 @@ impl Capture {
 /// panicked (or, for an `async fn`, its future was dropped before finishing).
 pub struct CallGuard {
     hook: Arc<Hook>,
+    /// The hook's change scripts as they were when the call started.
+    before: Option<Arc<str>>,
+    after: Option<Arc<str>>,
+    /// What the scripts changed, and what they failed to, for the record.
+    changes: Map<String, Value>,
+    change_errors: Vec<String>,
+    skipped: bool,
     start: Instant,
     started_at: f64,
     thread: String,
@@ -120,7 +141,128 @@ pub struct CallGuard {
     finished: bool,
 }
 
+/// What a `hook before` script asked to change.
+pub struct Changes {
+    args: Map<String, Value>,
+    instance: Option<Value>,
+    result: Option<Value>,
+}
+
+impl Changes {
+    pub fn arg(&self, name: &str) -> Option<&Value> {
+        self.args.get(name)
+    }
+
+    pub fn instance(&self) -> Option<&Value> {
+        self.instance.as_ref()
+    }
+
+    pub fn result(&self) -> Option<&Value> {
+        self.result.as_ref()
+    }
+}
+
 impl CallGuard {
+    /// Runs the `hook before` script, if there is one, with the captured arguments.
+    pub fn before(&mut self) -> Option<Changes> {
+        let script = self.before.clone()?;
+        let mut input = Map::new();
+        input.insert("args".into(), self.args.clone());
+        input.insert("instance".into(), self.this.clone().unwrap_or(Value::Null));
+        let mut changes = self.run_script("before", &script, input)?;
+        let args = match changes.remove("args") {
+            Some(Value::Object(args)) => args,
+            Some(other) => {
+                self.failed("args", &Error::mismatch("a map of arguments", &other));
+                Map::new()
+            }
+            None => Map::new(),
+        };
+        let instance = changes.remove("instance");
+        let result = changes.remove("result");
+        if let Some(key) = changes.keys().next() {
+            self.failed(key, &Error::BadCommand("a before script can return args, instance and result".into()));
+        }
+        Some(Changes { args, instance, result })
+    }
+
+    /// Runs the `hook after` script, if there is one, and returns the result it asked for.
+    pub fn after(&mut self, result: FieldRef<'_>) -> Option<Value> {
+        let script = self.after.clone()?;
+        let depth = self.hook.depth;
+        let current = capturing(|| catch_unwind(AssertUnwindSafe(|| result.snapshot(depth)))).unwrap_or(Value::Null);
+        let mut input = Map::new();
+        input.insert("args".into(), self.args.clone());
+        input.insert("instance".into(), self.this.clone().unwrap_or(Value::Null));
+        input.insert("result".into(), current);
+        let mut changes = self.run_script("after", &script, input)?;
+        let result = changes.remove("result");
+        if let Some(key) = changes.keys().next() {
+            self.failed(key, &Error::BadCommand("an after script can return result".into()));
+        }
+        result
+    }
+
+    /// Writes `value` into an argument, the receiver or the result, the way `set` writes.
+    pub fn change(&mut self, what: &str, target: FieldMut<'_>, value: &Value) {
+        match catch_unwind(AssertUnwindSafe(|| target.assign(value))) {
+            Ok(Ok(())) => {
+                self.changes.insert(what.to_owned(), value.clone());
+            }
+            Ok(Err(error)) => self.failed(what, &error),
+            Err(panic) => self.failed(what, &Error::Panicked(crate::error::panic_message(&*panic))),
+        }
+    }
+
+    /// The value a `hook before` script returned instead of running the body, if it could be built.
+    pub fn skip<R>(&mut self, value: &Value, built: Result<R, Error>) -> Option<R> {
+        match built {
+            Ok(result) => {
+                self.skipped = true;
+                self.changes.insert("result".into(), value.clone());
+                Some(result)
+            }
+            Err(error) => {
+                self.failed("result", &error);
+                None
+            }
+        }
+    }
+
+    /// A replacement result built from JSON, if its type allows; otherwise `None`, and the caller
+    /// writes the value into the result with [`CallGuard::change`].
+    pub fn replace<R>(&mut self, value: &Value, built: Result<R, Error>) -> Option<R> {
+        let result = built.ok()?;
+        self.changes.insert("result".into(), value.clone());
+        Some(result)
+    }
+
+    fn failed(&mut self, what: &str, error: &Error) {
+        self.hook.change_failures.fetch_add(1, Ordering::Relaxed);
+        self.change_errors.push(format!("{what}: {error}"));
+    }
+
+    /// Runs a change script with `input` as its variables; the map it returned, or `None` if it
+    /// returned `()` or failed.
+    fn run_script(&mut self, phase: &str, script: &str, input: Map<String, Value>) -> Option<Map<String, Value>> {
+        match capturing(|| catch_unwind(AssertUnwindSafe(|| run_change_script(script, input)))) {
+            Ok(Ok(Value::Object(changes))) => Some(changes),
+            Ok(Ok(Value::Null)) => None,
+            Ok(Ok(other)) => {
+                self.failed(phase, &Error::mismatch("a map of changes, or ()", &other));
+                None
+            }
+            Ok(Err(error)) => {
+                self.failed(phase, &error);
+                None
+            }
+            Err(panic) => {
+                self.failed(phase, &Error::Panicked(crate::error::panic_message(&*panic)));
+                None
+            }
+        }
+    }
+
     pub fn exit(mut self, result: FieldRef<'_>) {
         let depth = self.hook.depth;
         match capturing(|| catch_unwind(AssertUnwindSafe(|| result.snapshot(depth)))) {
@@ -142,6 +284,15 @@ impl CallGuard {
         });
         if let Some(this) = self.this.take() {
             record["self"] = this;
+        }
+        if !self.changes.is_empty() {
+            record["changes"] = Value::Object(std::mem::take(&mut self.changes));
+        }
+        if self.skipped {
+            record["skipped"] = Value::Bool(true);
+        }
+        if !self.change_errors.is_empty() {
+            record["changeErrors"] = json!(self.change_errors);
         }
         record[outcome] = value;
         self.hook.push(record);
@@ -167,6 +318,16 @@ thread_local! {
     static CAPTURING: Cell<bool> = const { Cell::new(false) };
     /// The message of the last panic on this thread, for the call guard that sees it unwind.
     static LAST_PANIC: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+#[cfg(feature = "script")]
+fn run_change_script(script: &str, input: Map<String, Value>) -> Result<Value, Error> {
+    crate::script::change(script, input)
+}
+
+#[cfg(not(feature = "script"))]
+fn run_change_script(_script: &str, _input: Map<String, Value>) -> Result<Value, Error> {
+    Err(Error::BadCommand("change scripts need scry-rs's `script` feature".into()))
 }
 
 fn capturing<R>(f: impl FnOnce() -> R) -> R {
@@ -216,7 +377,16 @@ struct Hook {
     calls: Mutex<Calls>,
     arrived: Condvar,
     capture_failures: AtomicU64,
+    change_failures: AtomicU64,
     last_used: Mutex<Instant>,
+    scripts: Mutex<Scripts>,
+}
+
+/// A hook's `hook before` and `hook after` scripts.
+#[derive(Default)]
+struct Scripts {
+    before: Option<Arc<str>>,
+    after: Option<Arc<str>>,
 }
 
 #[derive(Default)]
@@ -262,14 +432,29 @@ impl Hook {
         self.arrived.notify_all();
     }
 
+    fn scripts(&self) -> (Option<Arc<str>>, Option<Arc<str>>) {
+        self.scripts.lock().map(|scripts| (scripts.before.clone(), scripts.after.clone())).unwrap_or_default()
+    }
+
+    /// Whether the hook changes calls rather than only recording them: a write to the app.
+    fn intervenes(&self) -> bool {
+        let (before, after) = self.scripts();
+        before.is_some() || after.is_some()
+    }
+
     fn summary(&self) -> Value {
         let (next, dropped) = self.calls.lock().map(|calls| (calls.next, calls.dropped)).unwrap_or_default();
+        let (before, after) = self.scripts();
         json!({
             "hook": self.id,
             "path": self.site.path,
             "calls": next,
             "droppedCalls": dropped,
             "captureFailures": self.capture_failures.load(Ordering::Relaxed),
+            "intervenes": before.is_some() || after.is_some(),
+            "before": before.as_deref(),
+            "after": after.as_deref(),
+            "changeFailures": self.change_failures.load(Ordering::Relaxed),
         })
     }
 
@@ -284,6 +469,7 @@ impl Hook {
             "truncated": cursor < oldest,
             "droppedCalls": calls.dropped,
             "captureFailures": self.capture_failures.load(Ordering::Relaxed),
+            "changeFailures": self.change_failures.load(Ordering::Relaxed),
         })
     }
 }
@@ -368,7 +554,18 @@ fn duration(key: &str, value: &str) -> Result<Duration, Error> {
 }
 
 pub(crate) const HELP: &str = "hooks [filter] | hook add <function> [depth=2] [capacity=1000] [self=false] [ttl=30m] \
-     | hook read <id> [cursor] | hook wait <id> [timeout=30s] [cursor=n] [<rhai predicate>] | hook remove <id> | hook clear";
+     | hook read <id> [cursor] | hook wait <id> [timeout=30s] [cursor=n] [<rhai predicate>] \
+     | hook before <id> [<rhai>] | hook after <id> [<rhai>] | hook remove <id> | hook clear";
+
+#[cfg(feature = "script")]
+fn check_change_script(script: &str) -> Result<(), Error> {
+    crate::script::check_change(script)
+}
+
+#[cfg(not(feature = "script"))]
+fn check_change_script(_script: &str) -> Result<(), Error> {
+    Err(Error::BadCommand("change scripts need scry-rs's `script` feature".into()))
+}
 
 /// Runs a `hooks` or `hook ...` command; `None` for any other command.
 pub fn command(line: &str) -> Option<Result<Value, Error>> {
@@ -392,8 +589,13 @@ fn list(filter: &str) -> Value {
         found
             .iter()
             .map(|site| {
-                let hook = active.iter().find(|hook| std::ptr::eq(hook.site, *site)).map(|hook| hook.id);
-                json!({ "path": site.path, "signature": site.signature, "hook": hook })
+                let hook = active.iter().find(|hook| std::ptr::eq(hook.site, *site));
+                let mut entry =
+                    json!({ "path": site.path, "signature": site.signature, "hook": hook.map(|hook| hook.id) });
+                if hook.is_some_and(|hook| hook.intervenes()) {
+                    entry["intervenes"] = Value::Bool(true);
+                }
+                entry
             })
             .collect(),
     )
@@ -419,6 +621,23 @@ fn hook(text: &str) -> Result<Value, Error> {
         "wait" => {
             let (id, rest) = id()?;
             wait(&find(id)?, rest)
+        }
+        "before" | "after" => {
+            let (id, script) = id()?;
+            let hook = find(id)?;
+            hook.touch();
+            let script: Option<Arc<str>> = if script.is_empty() { None } else { Some(script.into()) };
+            if let Some(script) = &script {
+                check_change_script(script)?;
+            }
+            if let Ok(mut scripts) = hook.scripts.lock() {
+                if action == "before" {
+                    scripts.before = script;
+                } else {
+                    scripts.after = script;
+                }
+            }
+            Ok(hook.summary())
         }
         "remove" => {
             let (id, _) = id()?;
@@ -476,7 +695,9 @@ fn add(text: &str) -> Result<Value, Error> {
         calls: Mutex::new(Calls::default()),
         arrived: Condvar::new(),
         capture_failures: AtomicU64::new(0),
+        change_failures: AtomicU64::new(0),
         last_used: Mutex::new(Instant::now()),
+        scripts: Mutex::new(Scripts::default()),
     });
     if let Ok(mut slot) = site.hook.lock() {
         *slot = Some(Arc::clone(&hook));

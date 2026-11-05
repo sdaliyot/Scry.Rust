@@ -31,6 +31,7 @@ commands: roots | ls <path> | get <path> [depth] | set <path> <json> | help
           eval <rhai script> | eval --file <path> | eval -   (script from stdin)
           hooks [filter] | hook add <function> [depth=2] [capacity=1000] [self=true] [ttl=30m]
           hook read <id> [cursor] | hook wait <id> [timeout=30s] [cursor=n] [<rhai predicate>]
+          hook before <id> [<rhai>] | hook after <id> [<rhai>]   (change calls; empty removes)
           hook remove <id> | hook clear";
 
 /// Must match `scry::endpoint::targets_dir`.

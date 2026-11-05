@@ -16,6 +16,11 @@
 //! records the call when its work completes. While no hook is on the function, the cost is one
 //! atomic load per call. See `scry::hooks` for what is captured when one is.
 //!
+//! A hook can also change the call. Before the body, a `hook before` script may write by-value and
+//! `&mut` parameters - rebound as `mut` for that - and a `&mut self` receiver, or give a result that
+//! replaces running the body; after it, a `hook after` script may replace the result. Values are
+//! written through the same probes as `set`, and built through `FromValue` for a replacement.
+//!
 //! Which functions get a hook point: module-level functions and the methods of module-level
 //! `impl` blocks, generic and `async` ones included. Not these, each listed in the report:
 //!
@@ -66,50 +71,115 @@ pub fn hook_point(source: &Source, attrs: &[Attribute], sig: &Signature, label: 
         ReturnType::Type(_, ty) => ty.to_token_stream(),
     };
 
+    // What a call captures, and what a `hook before` script may write: by-value and `&mut`
+    // parameters (rebound as `mut` so they can be written), and a `&mut self` receiver. A `&T`
+    // parameter is never written: that would be writing through a shared reference.
     let mut captures = Vec::new();
+    let mut rebinds = Vec::new();
+    let mut changes = Vec::new();
     for input in &sig.inputs {
         match input {
-            FnArg::Receiver(_) => captures.push(quote! {
-                __scry_capture.this((&&&::scry::__private::Probe(&self)).scry_ref());
-            }),
-            FnArg::Typed(typed) => {
-                if let Pat::Ident(pat) = &*typed.pat
-                    && pat.by_ref.is_none()
-                    && pat.subpat.is_none()
-                {
-                    let ident = &pat.ident;
-                    let name = ident.to_string();
-                    captures.push(quote! {
-                        __scry_capture.arg(#name, (&&&::scry::__private::Probe(&#ident)).scry_ref());
+            FnArg::Receiver(receiver) => {
+                captures.push(quote! {
+                    __scry_capture.this((&&&::scry::__private::Probe(&self)).scry_ref());
+                });
+                let mutable = match (&receiver.reference, &*receiver.ty) {
+                    (Some(_), _) => receiver.mutability.is_some(),
+                    (None, Type::Reference(reference)) => reference.mutability.is_some(),
+                    _ => false,
+                };
+                if mutable {
+                    changes.push(quote! {
+                        if let ::core::option::Option::Some(__scry_value) = __scry_changes.instance() {
+                            __scry_c.change("self", (&&&::scry::__private::ProbeMut::new(&mut *self)).scry_mut(), __scry_value);
+                        }
                     });
                 }
+            }
+            FnArg::Typed(typed) => {
+                let Pat::Ident(pat) = &*typed.pat else { continue };
+                if pat.by_ref.is_some() || pat.subpat.is_some() {
+                    continue;
+                }
+                let ident = &pat.ident;
+                let name = ident.to_string();
+                captures.push(quote! {
+                    __scry_capture.arg(#name, (&&&::scry::__private::Probe(&#ident)).scry_ref());
+                });
+                if matches!(&*typed.ty, Type::Reference(reference) if reference.mutability.is_none()) {
+                    continue;
+                }
+                if pat.mutability.is_none() {
+                    rebinds.push(quote!(let mut #ident = #ident;));
+                }
+                changes.push(quote! {
+                    if let ::core::option::Option::Some(__scry_value) = __scry_changes.arg(#name) {
+                        __scry_c.change(#name, (&&&::scry::__private::ProbeMut::new(&mut #ident)).scry_mut(), __scry_value);
+                    }
+                });
             }
         }
     }
 
     let signature = crate::functions::signature_text(source, sig);
     let path = format!("::{label}");
+    let allow = quote!(#[allow(unused_mut, clippy::all, clippy::pedantic, clippy::nursery, clippy::restriction)]);
+    let probes = quote! {
+        #[allow(unused_imports)]
+        use ::scry::__private::{
+            ViaDebug as _, ViaFromValue as _, ViaNoValue as _, ViaOpaque as _, ViaOtherMut as _, ViaReflect as _,
+            ViaReflectMut as _,
+        };
+    };
     let header = quote! {
-        #[allow(clippy::all, clippy::pedantic, clippy::nursery, clippy::restriction)]
+        #allow
         static __SCRY_HOOK: ::scry::__private::HookSite =
             ::scry::__private::HookSite::new(::core::concat!(::core::module_path!(), #path), #signature);
         #[::scry::__private::linkme::distributed_slice(::scry::__private::HOOK_SITES)]
         #[linkme(crate = ::scry::__private::linkme)]
         #[allow(non_upper_case_globals, clippy::all, clippy::pedantic, clippy::nursery, clippy::restriction)]
         static __SCRY_HOOK_SITE: &::scry::__private::HookSite = &__SCRY_HOOK;
-        #[allow(clippy::all, clippy::pedantic, clippy::nursery, clippy::restriction)]
-        let __scry_call = __SCRY_HOOK.enter(|__scry_capture| {
-            #[allow(unused_imports)]
-            use ::scry::__private::{ViaDebug as _, ViaOpaque as _, ViaReflect as _};
+        #allow
+        let mut __scry_call = __SCRY_HOOK.enter(|__scry_capture| {
+            #probes
             #(#captures)*
         });
+        #(#allow #rebinds)*
+        #allow
+        let __scry_skip: ::core::option::Option<#returns> = match &mut __scry_call {
+            ::core::option::Option::Some(__scry_c) => match __scry_c.before() {
+                ::core::option::Option::Some(__scry_changes) => {
+                    #probes
+                    #(#changes)*
+                    match __scry_changes.result() {
+                        ::core::option::Option::Some(__scry_value) => {
+                            __scry_c.skip(__scry_value, (&&&::scry::__private::ArgProbe::<#returns>::new()).scry_arg(__scry_value))
+                        }
+                        ::core::option::Option::None => ::core::option::Option::None,
+                    }
+                }
+                ::core::option::Option::None => ::core::option::Option::None,
+            },
+            ::core::option::Option::None => ::core::option::Option::None,
+        };
     };
-    // A `let` so it can carry lint attributes, which an `if` statement cannot.
+    // Lets, so they can carry lint attributes, which an `if` statement cannot.
     let exit = quote! {
-        #[allow(clippy::all, clippy::pedantic, clippy::nursery, clippy::restriction)]
+        #allow
+        let () = if let ::core::option::Option::Some(__scry_c) = &mut __scry_call {
+            #probes
+            if let ::core::option::Option::Some(__scry_value) = __scry_c.after((&&&::scry::__private::Probe(&__scry_result)).scry_ref()) {
+                match __scry_c.replace(&__scry_value, (&&&::scry::__private::ArgProbe::<#returns>::new()).scry_arg(&__scry_value)) {
+                    ::core::option::Option::Some(__scry_replacement) => __scry_result = __scry_replacement,
+                    ::core::option::Option::None => {
+                        __scry_c.change("result", (&&&::scry::__private::ProbeMut::new(&mut __scry_result)).scry_mut(), &__scry_value)
+                    }
+                }
+            }
+        };
+        #allow
         let () = if let ::core::option::Option::Some(__scry_call) = __scry_call {
-            #[allow(unused_imports)]
-            use ::scry::__private::{ViaDebug as _, ViaOpaque as _, ViaReflect as _};
+            #probes
             __scry_call.exit((&&&::scry::__private::Probe(&__scry_result)).scry_ref());
         };
     };
@@ -117,17 +187,16 @@ pub fn hook_point(source: &Source, attrs: &[Attribute], sig: &Signature, label: 
     let tail = if unit { quote!() } else { quote!(__scry_result) };
     let exit = quote!(#exit #tail);
     // The body goes between `open` and `close`, so these are text: a token stream cannot hold an
-    // unbalanced brace.
-    // The result's type is spelled out: a probe needs it settled, and an `async` block's `?` needs
-    // it to know what to convert errors into.
+    // unbalanced brace. The result's type is spelled out: a probe needs it settled, and an
+    // `async` block's `?` needs it to know what to convert errors into.
     let (open, close) = if sig.asyncness.is_some() {
-        ("async move {".to_owned(), "}.await;")
+        ("async move {".to_owned(), "}.await, };")
     } else {
-        (format!("::scry::__private::run_once(move || -> {returns} {{"), "});")
+        (format!("::scry::__private::run_once(move || -> {returns} {{"), "}), };")
     };
-    let allow = "#[allow(clippy::all, clippy::pedantic, clippy::nursery, clippy::restriction)]";
+    let skipped = "::core::option::Option::Some(__scry_skipped) => __scry_skipped, ::core::option::Option::None =>";
     Ok(HookPoint {
-        prefix: format!(" {header} {allow} let __scry_result: {returns} = {open} "),
+        prefix: format!(" {header} {allow} let mut __scry_result: {returns} = match __scry_skip {{ {skipped} {open} "),
         suffix: format!(" {close} {exit} "),
     })
 }
