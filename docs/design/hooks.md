@@ -1,6 +1,34 @@
 # Design: method hooks for Scry.Rust
 
-Status: proposal, for review. Nothing here is implemented yet.
+Status: phase 1 (observing calls, and the `Cargo.toml` configuration) is implemented. Changing
+calls is still a proposal. Where the implementation differs from the plan below, the notes in
+"As built" say how.
+
+## As built
+
+- **`hook wait` options** are `key=value` words before the predicate:
+  `hook wait 1 timeout=60 cursor=0 args.index == 2`.
+- **Predicate variables:**
+  - `self` is a Rust keyword and `this` is Rhai's, so the captured `self` is `instance`.
+  - The others are `args`, `result`, `panic`, `cancelled`, `seq`, `duration_micros`, `thread`,
+    and `call` for the whole record.
+- **Scripts** get `hook_add`, `hook_read` and `hook_remove`, but not `hook_wait`. A script runs on
+  the registry's thread, the UI thread in a Dioxus app, so waiting there would stop the very calls
+  it waits for.
+- **The body runs through `run_once(move || ...)`** rather than calling the closure directly. A
+  closure called directly is inferred `FnMut`, which cannot return what it reborrows from `&mut`
+  parameters (`fn first_mut(&mut self) -> Option<&mut T>`). The result is declared with the
+  function's type, which an `async fn`'s `?` and the result probe both need.
+- **Build safety net:**
+  - It works as planned.
+  - `SCRY_VERBOSE=1` shows the output of attempts that were thrown away.
+  - It already caught a lint that `cargo scry clippy -- -D warnings` turned into an error inside a
+    hook point, and that lint is now allowed there.
+- **Cost of an inactive hook point:** within the noise of a 4 ns/call benchmark loop in a release
+  build, so a fraction of a nanosecond.
+- **Config changes rebuild:** the manifests read for `[package.metadata.scry]` are added to the
+  build's dependency file, so editing `exclude` rebuilds the crate. Cargo ignores metadata changes
+  otherwise.
 
 ## Goal
 
@@ -152,7 +180,7 @@ any thread.
 | `hooks [filter]` | Hookable functions, with path and signature; active hooks are marked |
 | `hook add <path> [depth=2] [capacity=1000] [self=false] [ttl=30m]` | Turns recording on for one function and returns a hook id. Adding a function that is already hooked returns the existing id. `path` takes a unique `::`-suffix, as `call` does. |
 | `hook read <id> [cursor=0]` | Calls from `cursor` on, with the next cursor, `droppedCalls`, `captureFailures` and `truncated` |
-| `hook wait <id> [predicate] [timeout=30s] [cursor]` | Waits for the first call from `cursor` on (default: from now) for which the Rhai `predicate` holds. Its fields are in scope: `args`, `result`, `panic`, `self`, `seq`, `durationMicros`. Returns the call, or `satisfied: false` when it times out |
+| `hook wait <id> [timeout=30s] [cursor=n] [predicate]` | Waits for the first call from `cursor` on (default: from now) for which the Rhai `predicate` holds; see "As built" for its variables. Returns the call, or `satisfied: false` when it times out |
 | `hook remove <id>` / `hook clear` | Turns recording off and drops the buffer |
 
 Three points worth calling out:

@@ -8,5 +8,10 @@ publish.workspace = true
 # Builds the Scry.Rust registry into the app. Off by default: a normal build carries none of it.
 scry = ["dep:scry"]
 
+# How `cargo scry` treats this crate. `next_random` runs in the worker's hot loop, so it gets no
+# hook point.
+[package.metadata.scry.hooks]
+exclude = ["crate::util::next_random"]
+
 [dependencies]
 scry = { package = "scry-rs", path = "../../scry/crates/scry-rs", optional = true }

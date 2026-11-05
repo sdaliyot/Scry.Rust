@@ -104,6 +104,11 @@ fn respond(line: &str, token: &str, dispatch: &dyn Fn(Job) -> bool) -> (Value, b
     let Some(command) = request["command"].as_str() else {
         return (failure("bad_request", "the request has no \"command\" string"), true);
     };
+    // Hook commands work on captured records only, so they are answered here: a long `hook wait`
+    // never occupies the registry's thread, which in a Dioxus app is the UI thread.
+    if let Some(result) = crate::hooks::command(command) {
+        return (crate::command::reply(result, Vec::new()), true);
+    }
     let (sender, receiver) = mpsc::channel();
     if !dispatch((command.to_owned(), sender)) {
         return (failure("stopped", "the registry is no longer running"), true);

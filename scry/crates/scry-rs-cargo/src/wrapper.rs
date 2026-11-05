@@ -9,12 +9,15 @@
 //! the original paths in diagnostics, panics and debug info, and the dependency file rustc writes
 //! for cargo is rewritten the same way, so editing an original file triggers a rebuild.
 
+use std::cell::OnceCell;
 use std::env;
 use std::ffi::OsString;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::config::Config;
 use crate::rewrite::{Options, Paths, normalize, rewrite_crate};
 
 /// Set by `cargo scry` to an id of the generator build. Recorded as an environment dependency of
@@ -24,6 +27,10 @@ pub const GENERATOR_ID: &str = "SCRY_GENERATOR_ID";
 /// A wrapper to run rustc through after this one, as `<wrapper> <rustc> <args>`: `clippy-driver`
 /// for `cargo scry clippy`.
 pub const NEXT_WRAPPER: &str = "SCRY_NEXT_WRAPPER";
+
+/// Set to show the output of compile attempts that were thrown away (see [`run`]), to see why
+/// generated code did not compile.
+pub const VERBOSE: &str = "SCRY_VERBOSE";
 
 /// rustc options whose value is the next argument, so it is not taken for the source file.
 const TAKES_VALUE: &[&str] = &[
@@ -106,34 +113,91 @@ impl Invocation {
     }
 }
 
+/// Compiles one crate: rewritten if it opted in, as is otherwise.
+///
+/// Generated code must never be what breaks a build. So a rewritten crate that fails to compile is
+/// compiled again without hook points, and if that fails too, from its original sources. Each
+/// attempt's output is held back until it is the one kept, so a real error in the app's own code
+/// is reported once, against the original files, and only a failure of the generated code warns.
 pub fn run(rustc: OsString, args: Vec<OsString>) -> u8 {
     let args: Vec<String> = args.into_iter().map(|arg| arg.to_string_lossy().into_owned()).collect();
     let invocation = Invocation::parse(args);
     if !invocation.opted_in() {
         return exec(&rustc, &invocation.args);
     }
-    match rewritten(&rustc, &invocation) {
-        Ok((args, dep_info, mappings)) => {
-            let code = exec(&rustc, &args);
-            if code == 0
-                && let Some(dep_info) = dep_info
-            {
-                fix_dep_info(&dep_info, &mappings);
+    let crate_name = invocation.values("--crate-name").next().unwrap_or("crate").to_owned();
+    let mir = OnceCell::new();
+    let mut first_error = None;
+    for hook_points in [true, false] {
+        let attempt = match rewritten(&rustc, &invocation, hook_points, &mir) {
+            Ok(attempt) => attempt,
+            Err(error) => {
+                eprintln!("warning: scry: not generating a registry for `{crate_name}`: {error}");
+                return exec(&rustc, &invocation.args);
             }
-            code
+        };
+        if hook_points && attempt.hook_points == 0 {
+            // Nothing to leave out on a retry.
+            return finish(&rustc, &attempt, exec(&rustc, &attempt.args));
         }
-        Err(error) => {
-            // A rewrite failure must not break the build: compile the originals, which still
-            // gives a working app, just with fewer roots.
-            eprintln!("warning: scry: not generating a registry for this crate: {error}");
-            exec(&rustc, &invocation.args)
+        let (code, stdout, stderr) = exec_captured(&rustc, &attempt.args);
+        if code == 0 {
+            replay(&stdout, &stderr);
+            if let Some(error) = &first_error {
+                eprintln!(
+                    "warning: scry: `{crate_name}` did not compile with hook points, so it was built without them ({error}). \
+                     Please report this, with the function named in the error."
+                );
+            }
+            return finish(&rustc, &attempt, 0);
+        }
+        first_error.get_or_insert_with(|| first_error_message(&stderr));
+        if env::var_os(VERBOSE).is_some() {
+            eprintln!(
+                "scry: attempt {} for `{crate_name}` failed:",
+                if hook_points { "with hook points" } else { "without hook points" }
+            );
+            replay(&stdout, &stderr);
         }
     }
+    let (code, stdout, stderr) = exec_captured(&rustc, &invocation.args);
+    replay(&stdout, &stderr);
+    if code == 0 {
+        let error = first_error.unwrap_or_default();
+        eprintln!(
+            "warning: scry: the code generated for `{crate_name}` did not compile, so it was built without scry ({error}). \
+             Please report this."
+        );
+    }
+    code
 }
 
-type Rewritten = (Vec<String>, Option<PathBuf>, Vec<(String, String)>);
+fn finish(_rustc: &OsString, attempt: &Rewritten, code: u8) -> u8 {
+    if code == 0
+        && let Some(dep_info) = &attempt.dep_info
+    {
+        fix_dep_info(dep_info, &attempt.mappings, &attempt.manifests);
+    }
+    code
+}
 
-fn rewritten(rustc: &OsString, invocation: &Invocation) -> Result<Rewritten, String> {
+/// The arguments to compile a rewritten crate with, and what to fix up afterwards.
+struct Rewritten {
+    args: Vec<String>,
+    dep_info: Option<PathBuf>,
+    mappings: Vec<(String, String)>,
+    /// Manifests whose `[package.metadata.scry]` shaped the rewrite: cargo does not rebuild for a
+    /// metadata change on its own, so they are added to the dependency file.
+    manifests: Vec<PathBuf>,
+    hook_points: usize,
+}
+
+fn rewritten(
+    rustc: &OsString,
+    invocation: &Invocation,
+    hook_points: bool,
+    mir: &OnceCell<Result<String, String>>,
+) -> Result<Rewritten, String> {
     let cwd = env::current_dir().map_err(|error| error.to_string())?;
     let source_index = invocation.source.ok_or("no source file")?;
     let root = normalize(&cwd.join(&invocation.args[source_index]));
@@ -148,15 +212,19 @@ fn rewritten(rustc: &OsString, invocation: &Invocation) -> Result<Rewritten, Str
     let build_out_dir = env::var_os("OUT_DIR").map(PathBuf::from);
 
     let paths = Paths { manifest_dir: &manifest_dir, mirror_root: &mirror_root, out_dir: build_out_dir.as_deref() };
+    let config = Config::load(&manifest_dir)?;
+    let manifests = config.manifests.clone();
     let options = Options {
         crate_name: crate_name.to_owned(),
+        config,
+        hook_points,
         dioxus: invocation.has_extern("dioxus"),
         // A test harness supplies its own `main`.
         executable: invocation.values("--crate-type").any(|kind| kind == "bin")
             && !invocation.args.iter().any(|arg| arg == "--test"),
     };
     let mir_path = mirror_root.with_extension("mir");
-    let mir = || mir_dump(rustc, invocation, &mir_path);
+    let mir = || mir.get_or_init(|| mir_dump(rustc, invocation, &mir_path)).clone();
     let output = rewrite_crate(&root, &paths, &options, &mir)?;
 
     // Later mappings win in rustc, so the more specific `_external` ones come last.
@@ -178,7 +246,7 @@ fn rewritten(rustc: &OsString, invocation: &Invocation) -> Result<Rewritten, Str
             None => None,
         })
     });
-    Ok((args, dep_info, mappings))
+    Ok(Rewritten { args, dep_info, mappings, manifests, hook_points: output.hook_points })
 }
 
 /// Compiles the original sources once more, to MIR only, for the generic instantiations they use.
@@ -219,7 +287,7 @@ fn mir_dump(rustc: &OsString, invocation: &Invocation, path: &Path) -> Result<St
     Ok(text)
 }
 
-fn exec(rustc: &OsString, args: &[String]) -> u8 {
+fn command(rustc: &OsString, args: &[String]) -> Command {
     let mut command = match env::var_os(NEXT_WRAPPER) {
         Some(next) => {
             let mut command = Command::new(next);
@@ -228,7 +296,48 @@ fn exec(rustc: &OsString, args: &[String]) -> u8 {
         }
         None => Command::new(rustc),
     };
-    match command.args(args).status() {
+    command.args(args);
+    command
+}
+
+/// Runs rustc with its output held back, for an attempt that may be thrown away.
+fn exec_captured(rustc: &OsString, args: &[String]) -> (u8, Vec<u8>, Vec<u8>) {
+    match command(rustc, args).output() {
+        Ok(output) => (output.status.code().unwrap_or(1).clamp(0, 255) as u8, output.stdout, output.stderr),
+        Err(error) => {
+            (1, Vec::new(), format!("error: scry: could not run {}: {error}\n", rustc.to_string_lossy()).into_bytes())
+        }
+    }
+}
+
+fn replay(stdout: &[u8], stderr: &[u8]) {
+    let _ = std::io::stdout().write_all(stdout);
+    let _ = std::io::stderr().write_all(stderr);
+}
+
+/// The first error rustc reported, from its JSON diagnostics (cargo asks for those) or its text.
+fn first_error_message(stderr: &[u8]) -> String {
+    let text = String::from_utf8_lossy(stderr);
+    for line in text.lines() {
+        if let Ok(diagnostic) = serde_json::from_str::<serde_json::Value>(line)
+            && diagnostic["level"] == "error"
+        {
+            let message = diagnostic["message"].as_str().unwrap_or("an error");
+            let at = &diagnostic["spans"][0];
+            return match at["file_name"].as_str() {
+                Some(file) => format!("{message} at {file}:{}", at["line_start"]),
+                None => message.to_owned(),
+            };
+        }
+        if let Some(message) = line.strip_prefix("error") {
+            return format!("error{message}");
+        }
+    }
+    "an error".into()
+}
+
+fn exec(rustc: &OsString, args: &[String]) -> u8 {
+    match command(rustc, args).status() {
         Ok(status) => status.code().unwrap_or(1).clamp(0, 255) as u8,
         Err(error) => {
             eprintln!("error: scry: could not run {}: {error}", rustc.to_string_lossy());
@@ -239,8 +348,16 @@ fn exec(rustc: &OsString, args: &[String]) -> u8 {
 
 /// Points the dependency file at the original sources, so cargo watches those, and records the
 /// generator id as an environment dependency.
-fn fix_dep_info(path: &Path, mappings: &[(String, String)]) {
+fn fix_dep_info(path: &Path, mappings: &[(String, String)], manifests: &[PathBuf]) {
     let Ok(mut text) = fs::read_to_string(path) else { return };
+    // The first rule lists what the output depends on; the manifests join it.
+    if let Some(end) = text.find('\n') {
+        let extra: String = manifests
+            .iter()
+            .map(|manifest| format!(" {}", manifest.display().to_string().replace(' ', "\\ ")))
+            .collect();
+        text.insert_str(end, &extra);
+    }
     for (from, to) in mappings.iter().rev() {
         // Make-style dependency files escape spaces in paths.
         for (from, to) in [(from.clone(), to.clone()), (from.replace(' ', "\\ "), to.replace(' ', "\\ "))] {

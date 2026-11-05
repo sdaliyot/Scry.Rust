@@ -207,6 +207,20 @@ fn engine(registry: &Rc<Registry>, printed: &Rc<RefCell<Vec<String>>>) -> Engine
         });
     }
 
+    // Hooks, without `hook_wait`: a script runs on the registry's thread - a Dioxus app's UI
+    // thread - so waiting there would stop the calls it waits for. `scry hook wait` waits elsewhere.
+    let hook = |line: String| -> Result<Dynamic, Box<EvalAltResult>> {
+        match crate::hooks::command(&line) {
+            Some(result) => result.map(|value| to_dynamic(&value)).map_err(raise),
+            None => Err(raise(Error::BadCommand(line))),
+        }
+    };
+    engine.register_fn("hook_add", move |path: &str| hook(format!("hook add {path}")));
+    engine.register_fn("hook_add", move |path: &str, options: &str| hook(format!("hook add {path} {options}")));
+    engine.register_fn("hook_read", move |id: INT| hook(format!("hook read {id}")));
+    engine.register_fn("hook_read", move |id: INT, cursor: INT| hook(format!("hook read {id} {cursor}")));
+    engine.register_fn("hook_remove", move |id: INT| hook(format!("hook remove {id}")));
+
     let shared = Rc::clone(registry);
     engine.register_fn("roots", move || -> Array { shared.roots().into_iter().map(|root| root.name.into()).collect() });
     let shared = Rc::clone(registry);
@@ -388,6 +402,36 @@ fn member_segment(name: String) -> Segment {
         Some(index) => Segment::Index(index),
         None => Segment::Field(name),
     }
+}
+
+/// An engine for `hook wait` predicates: no access to the app, only to the recorded call.
+pub(crate) fn predicate_engine() -> Engine {
+    let mut engine = Engine::new();
+    engine.set_module_resolver(DummyModuleResolver::new());
+    engine.set_max_operations(1_000_000);
+    engine
+}
+
+/// Whether a recorded call satisfies a predicate. Its fields are variables: `args`, `result`,
+/// `panic`, `cancelled`, `instance` (the captured `self`), `seq`, `duration_micros`, `thread`, and
+/// `call` for the whole record.
+pub(crate) fn predicate(engine: &Engine, ast: &rhai::AST, call: &Value) -> Result<bool, Error> {
+    let mut scope = Scope::new();
+    for (variable, field) in [
+        ("args", "args"),
+        ("result", "result"),
+        ("panic", "panic"),
+        ("cancelled", "cancelled"),
+        ("instance", "self"),
+        ("seq", "seq"),
+        ("duration_micros", "durationMicros"),
+        ("thread", "thread"),
+    ] {
+        scope.push(variable, to_dynamic(&call[field]));
+    }
+    scope.push("call", to_dynamic(call));
+    let value = engine.eval_ast_with_scope::<Dynamic>(&mut scope, ast).map_err(|error| failure(&error))?;
+    value.as_bool().map_err(|_| Error::Script(format!("the predicate gave {}, not a bool", value.type_name())))
 }
 
 fn json_args(args: &[Dynamic]) -> Result<Vec<serde_json::Value>, Error> {

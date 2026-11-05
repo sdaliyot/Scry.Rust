@@ -21,10 +21,12 @@
 //! same wrapper slot, so `cargo scry` runs `cargo check` itself and the wrapper hands each
 //! compilation on to `clippy-driver`, the way `cargo clippy` would.
 
+mod config;
 mod edits;
 mod functions;
 mod generate;
 mod generics;
+mod hookpoints;
 mod rewrite;
 mod tokens;
 mod wrapper;

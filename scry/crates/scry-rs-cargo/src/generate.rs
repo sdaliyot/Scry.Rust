@@ -14,6 +14,8 @@
 //!   per instantiation the crate calls, found in its MIR; see [`crate::generics`].
 //! - **Dioxus hooks** (crates that depend on `dioxus`): `let x = use_signal(..)` and the other
 //!   state hooks also record their handle under the component's name; see `scry::dioxus_hooks`.
+//! - **Hook points**: a few lines around the body of each hookable function, so `scry hook add`
+//!   can record its calls; see [`crate::hookpoints`].
 //! - **Endpoint** (executables): started at the top of `main`; in a Dioxus app the components
 //!   `main` launches also pump its requests on the UI thread.
 //!
@@ -30,9 +32,11 @@ use syn::{
     TraitItemFn, Type, TypeParamBound, Visibility, WherePredicate,
 };
 
+use crate::config::Config;
 use crate::edits::{Edits, Source};
 use crate::functions::{self, Callee};
 use crate::generics::{self, Index, Use};
+use crate::hookpoints;
 use crate::tokens;
 
 /// Hooks whose result is a state handle worth tracking.
@@ -69,6 +73,8 @@ pub struct Context<'a> {
     /// The concrete uses of the crate's generic functions and types, by name.
     pub uses: &'a HashMap<String, HashSet<Use>>,
     pub crate_name: &'a str,
+    /// Hook points are compiled in, with these exclusions; `None` when they are off.
+    pub hook_points: Option<&'a Config>,
 }
 
 pub struct Generator<'a> {
@@ -82,6 +88,8 @@ pub struct Generator<'a> {
     /// The module being visited, from the crate root.
     module: Vec<String>,
     fns: Vec<String>,
+    /// How many hook points this file got, for the report.
+    pub hook_points: usize,
 }
 
 impl<'a> Generator<'a> {
@@ -93,7 +101,7 @@ impl<'a> Generator<'a> {
         entry: bool,
         module: Vec<String>,
     ) -> Self {
-        Self { source, edits, cx, report, entry, inline_mods: 0, module, fns: Vec::new() }
+        Self { source, edits, cx, report, entry, inline_mods: 0, module, fns: Vec::new(), hook_points: 0 }
     }
 
     fn start_endpoint(&mut self, item: &ItemFn) {
@@ -181,6 +189,7 @@ impl<'ast> Visit<'ast> for Generator<'_> {
     fn visit_item_impl(&mut self, item: &'ast ItemImpl) {
         if self.fns.is_empty() {
             self.impl_shims(item);
+            self.impl_hook_points(item);
         }
         if let Some((None, path, _)) = &item.trait_ {
             let trait_name = path.segments.last().map(|segment| segment.ident.to_string()).unwrap_or_default();
@@ -216,6 +225,10 @@ impl<'ast> Visit<'ast> for Generator<'_> {
         self.start_endpoint(item);
         if self.fns.is_empty() {
             self.fn_shims(item);
+            let name = item.sig.ident.to_string();
+            if name != "main" {
+                self.hook_point(&item.attrs, &item.sig, &item.block, &name, std::slice::from_ref(&name));
+            }
         }
         self.fns.push(item.sig.ident.to_string());
         visit::visit_item_fn(self, item);
@@ -531,6 +544,78 @@ impl Generator<'_> {
             }
         }
         shims
+    }
+
+    /// A hook point in a function's body, unless hooks are off, the function is excluded, or it
+    /// cannot take one. `label` is its path after the module; `segments` the same as path segments,
+    /// for the exclusion patterns.
+    fn hook_point(
+        &mut self,
+        attrs: &[Attribute],
+        sig: &syn::Signature,
+        block: &syn::Block,
+        label: &str,
+        segments: &[String],
+    ) {
+        let Some(config) = self.cx.hook_points else { return };
+        let mut path = vec!["crate".to_owned()];
+        path.extend(self.module.iter().cloned());
+        path.extend(segments.iter().cloned());
+        if config.hook_excluded(&path) {
+            self.report.skipped("hook point", label, "excluded by [package.metadata.scry.hooks]");
+            return;
+        }
+        let name = sig.ident.to_string();
+        let reason = if name.starts_with(|c: char| c.is_ascii_uppercase())
+            || attrs.iter().any(|attr| attr.path().segments.last().is_some_and(|segment| segment.ident == "component"))
+        {
+            Some("it looks like a UI component".to_owned())
+        } else if attrs.iter().any(|attr| attr.path().is_ident("test") || attr.path().is_ident("bench")) {
+            Some("it is a test".to_owned())
+        } else {
+            functions::unknown_attribute(attrs).map(|attribute| format!("its #[{attribute}] attribute may rewrite it"))
+        };
+        if let Some(reason) = reason {
+            self.report.skipped("hook point", label, &reason);
+            return;
+        }
+        match hookpoints::hook_point(self.source, attrs, sig, label) {
+            Ok(point) => {
+                self.edits.insert(self.source.end(block.brace_token.span.open()), point.prefix);
+                self.edits.insert(self.source.start(block.brace_token.span.close()), point.suffix);
+                self.hook_points += 1;
+            }
+            Err(reason) => self.report.skipped("hook point", label, &reason),
+        }
+    }
+
+    /// Hook points for the methods of a module-level `impl` block.
+    fn impl_hook_points(&mut self, item: &ItemImpl) {
+        if self.cx.hook_points.is_none() || matches!(&item.trait_, Some((Some(_), _, _))) {
+            return;
+        }
+        let self_name = match &*item.self_ty {
+            Type::Path(path) => path.path.segments.last().map(|segment| segment.ident.to_string()),
+            _ => None,
+        }
+        .unwrap_or_else(|| functions::compact(&item.self_ty));
+        if let Some(attribute) = functions::unknown_attribute(&item.attrs) {
+            self.report.skipped(
+                "hook point",
+                &format!("impl {self_name}"),
+                &format!("its #[{attribute}] attribute may rewrite it"),
+            );
+            return;
+        }
+        for impl_item in &item.items {
+            let syn::ImplItem::Fn(method) = impl_item else { continue };
+            let name = method.sig.ident.to_string();
+            let label = match &item.trait_ {
+                Some((_, path, _)) => format!("<{self_name} as {}>::{name}", functions::compact(path)),
+                None => format!("{self_name}::{name}"),
+            };
+            self.hook_point(&method.attrs, &method.sig, &method.block, &label, &[self_name.clone(), name]);
+        }
     }
 
     fn track_hook(&mut self, local: &Local) {
@@ -988,6 +1073,10 @@ mod tests {
 
     /// The same, with `mir` as the crate's MIR dump.
     fn rewrite_with_mir(text: &str, hooks: bool, mir: &str) -> (String, String) {
+        rewrite_with(text, hooks, mir, None)
+    }
+
+    fn rewrite_with(text: &str, hooks: bool, mir: &str, hook_points: Option<&Config>) -> (String, String) {
         let source = Source::new(text.to_owned());
         let syntax = syn::parse_file(text).unwrap();
         let mut report = Report::default();
@@ -997,8 +1086,15 @@ mod tests {
         let mut index = Index::default();
         index.add_file(&[], &syntax);
         let uses = generics::scan(mir, &index.generic_names);
-        let cx =
-            Context { dyn_traits: &dyn_traits, hooks, endpoint: None, index: &index, uses: &uses, crate_name: "app" };
+        let cx = Context {
+            dyn_traits: &dyn_traits,
+            hooks,
+            endpoint: None,
+            index: &index,
+            uses: &uses,
+            crate_name: "app",
+            hook_points,
+        };
         let mut edits = Edits::default();
         Generator::new(&source, &mut edits, &cx, &mut report, true, Vec::new()).visit_file(&syntax);
         let out = edits.apply(text);
@@ -1169,5 +1265,45 @@ let _9: Cache<u8, u8>;
         let cache = out.lines().find(|line| line.starts_with("impl<K: Clone, V>")).unwrap();
         assert!(cache.contains("TypeId :: of :: < Cache < u32 , crate :: Item > >"), "{cache}");
         assert!(cache.contains("RefProbe :: < u32 >"), "K is replaced: {cache}");
+    }
+
+    #[test]
+    fn compiles_hook_points_into_hookable_functions() {
+        let text = "pub fn ratio(a: u32, b: u32) -> f64 {
+    a as f64 / b as f64
+}
+pub async fn fetch(id: u32) -> Result<u32, String> {
+    Ok(id)
+}
+struct S;
+impl S { fn get(&mut self, (a, b): (u8, u8)) -> &mut S { self } }
+impl Clone for S { fn clone(&self) -> Self { S } }
+const fn fixed() -> u8 { 1 }
+fn never() -> ! { loop {} }
+fn main() {}
+";
+        let config = Config::default();
+        let (out, report) = rewrite_with(text, false, "", Some(&config));
+        assert_eq!(out.matches("static __SCRY_HOOK :").count(), 4, "{report}");
+        for skipped in ["hook point fixed: skipped, it is a const fn", "hook point never: skipped, it returns `!`"] {
+            assert!(
+                report.contains(skipped),
+                "{skipped}:
+{report}"
+            );
+        }
+        assert!(!report.contains("hook point main"), "main gets no hook point: {report}");
+
+        let lines: Vec<&str> = out.lines().collect();
+        assert!(lines[0].contains(r#""::ratio""#) && lines[0].contains("run_once(move || -> f64 {"), "{}", lines[0]);
+        assert!(lines[0].contains(r#"__scry_capture . arg ("a""#), "{}", lines[0]);
+        assert_eq!(lines[1], "    a as f64 / b as f64", "the body's own lines are untouched");
+        assert!(lines[2].starts_with(" }); # [allow"), "{}", lines[2]);
+        assert!(lines[3].contains("let __scry_result: Result < u32 , String > = async move {"), "{}", lines[3]);
+        assert!(lines[5].contains("}.await;"), "{}", lines[5]);
+        let method = lines[7];
+        assert!(method.contains(r#""::S::get""#) && method.contains("__scry_capture . this"), "{method}");
+        assert!(!method.contains(r#"arg ("a""#), "a destructured parameter is not captured: {method}");
+        assert!(lines[8].contains(r#""::<S as Clone>::clone""#), "{}", lines[8]);
     }
 }

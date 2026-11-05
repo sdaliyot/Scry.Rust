@@ -27,6 +27,8 @@ mod command;
 pub mod endpoint;
 mod error;
 mod from_value;
+#[doc(hidden)]
+pub mod hooks;
 mod impls;
 mod path;
 mod reflect;

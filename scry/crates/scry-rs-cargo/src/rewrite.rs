@@ -12,6 +12,7 @@ use std::path::{Component, Path, PathBuf};
 
 use syn::visit::Visit;
 
+use crate::config::Config;
 use crate::edits::{Edits, Source};
 use crate::generate::{
     Context, Generator, LaunchCollector, ModCollector, ModDecl, Report, TraitCollector, resolve_dyn_traits,
@@ -24,6 +25,8 @@ pub struct Output {
     pub root: PathBuf,
     /// The drives of files outside the package, which need their own path remapping.
     pub external_drives: Vec<String>,
+    /// How many hook points were compiled in.
+    pub hook_points: usize,
 }
 
 pub struct Paths<'a> {
@@ -70,6 +73,11 @@ pub struct Options {
     /// It is an executable with a `main` to start the endpoint from.
     pub executable: bool,
     pub crate_name: String,
+    /// The crate's `[package.metadata.scry]` settings.
+    pub config: Config,
+    /// Compile hook points in, as far as `config` allows. Off for the retry after they failed to
+    /// compile.
+    pub hook_points: bool,
 }
 
 /// Rewrites the crate at `root`. `mir` compiles the original sources to a MIR dump, run only when
@@ -113,15 +121,27 @@ pub fn rewrite_crate(
         index: &index,
         uses: &uses,
         crate_name: &options.crate_name,
+        hook_points: (options.hook_points && options.config.hooks).then_some(&options.config),
     };
 
     let _ = fs::remove_dir_all(paths.mirror_root);
     let mut external_drives = HashSet::new();
+    let mut hook_points = 0;
+    if !options.config.hooks {
+        report.lines.push("hook points: off, by [package.metadata.scry.hooks]".into());
+    } else if !options.hook_points {
+        report.lines.push("hook points: off, because the crate did not compile with them".into());
+    }
     for (index, file) in files.iter().enumerate() {
         report.lines.push(format!("{}", file.original.display()));
         let mut edits = Edits::default();
-        Generator::new(&file.source, &mut edits, &cx, &mut report, index == 0, file.module.clone())
-            .visit_file(&file.syntax);
+        let mut generator = Generator::new(&file.source, &mut edits, &cx, &mut report, index == 0, file.module.clone());
+        generator.visit_file(&file.syntax);
+        let points = generator.hook_points;
+        if points > 0 {
+            report.lines.push(format!("  + hook points: {points}"));
+        }
+        hook_points += points;
 
         for (decl, child) in &file.mods {
             let Some(child) = child else { continue };
@@ -165,7 +185,7 @@ pub fn rewrite_crate(
     );
     let _ = fs::write(paths.mirror_root.join("scry-report.txt"), report);
 
-    Ok(Output { root: paths.mirror_of(root), external_drives: external_drives.into_iter().collect() })
+    Ok(Output { root: paths.mirror_of(root), external_drives: external_drives.into_iter().collect(), hook_points })
 }
 
 /// Reads and parses the module tree, plus files a build script generated that the crate includes.

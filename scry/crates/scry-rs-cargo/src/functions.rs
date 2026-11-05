@@ -121,6 +121,9 @@ pub fn shim(source: &Source, attrs: &[Attribute], sig: &Signature, callee: &Call
     if sig.variadic.is_some() {
         return Err("it is variadic".into());
     }
+    if matches!(&sig.output, ReturnType::Type(_, ty) if matches!(**ty, Type::Never(_))) {
+        return Err("it never returns".into());
+    }
     let unbound = sig.generics.params.iter().any(|param| match param {
         GenericParam::Lifetime(_) => false,
         GenericParam::Type(param) => !callee.subst.contains_key(&param.ident.to_string()),
@@ -336,7 +339,7 @@ pub fn spell(ty: &Type, self_ty: Option<&Type>, subst: &HashMap<String, Type>) -
 }
 
 /// The signature as written, on one line.
-fn signature_text(source: &Source, sig: &Signature) -> String {
+pub fn signature_text(source: &Source, sig: &Signature) -> String {
     let end = match &sig.output {
         ReturnType::Type(_, ty) => ty.span(),
         ReturnType::Default => sig.paren_token.span.close(),

@@ -27,8 +27,16 @@ const HELP: &str = "roots | ls <path> | get <path> [depth] | set <path> <json>
 /// `panic = "abort"`, or an app panic hook that exits, still ends the process.
 pub fn execute(registry: &Registry, line: &str) -> Value {
     let mut output = Vec::new();
-    let result = catch_unwind(AssertUnwindSafe(|| run(registry, line.trim(), &mut output)))
-        .unwrap_or_else(|panic| Err(Error::Panicked(crate::error::panic_message(&*panic))));
+    let result = catch_unwind(AssertUnwindSafe(|| match crate::hooks::command(line) {
+        Some(result) => result,
+        None => run(registry, line.trim(), &mut output),
+    }))
+    .unwrap_or_else(|panic| Err(Error::Panicked(crate::error::panic_message(&*panic))));
+    reply(result, output)
+}
+
+/// The JSON reply for a command's result and what it printed.
+pub(crate) fn reply(result: Result<Value, Error>, output: Vec<String>) -> Value {
     let mut reply = match result {
         Ok(result) => json!({ "ok": true, "result": result }),
         Err(error) => json!({ "ok": false, "error": { "code": error.code(), "message": error.to_string() } }),
@@ -84,7 +92,7 @@ fn run(registry: &Registry, line: &str, output: &mut Vec<String>) -> Result<Valu
             let _ = output;
             Err(Error::BadCommand("scripts need scry-rs's `script` feature, which this build turned off".into()))
         }
-        "help" | "" => Ok(Value::String(HELP.into())),
+        "help" | "" => Ok(Value::String(format!("{HELP} | {}", crate::hooks::HELP))),
         other => Err(Error::BadCommand(format!("unknown command '{other}'; {HELP}"))),
     }
 }

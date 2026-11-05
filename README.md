@@ -150,6 +150,51 @@ scry eval 'APP.labels.get(999)'             # Cache<u32, String>::get on the liv
 - The extra MIR pass runs only for crates that have generic items. On the demo it adds about
   2 seconds to a rebuild.
 
+## Hooking calls
+
+Every hookable function in a `cargo scry` build has a hook point compiled in. `scry hook add` turns
+on recording for one function: each call's arguments, result or panic, duration and thread.
+
+```powershell
+scry hooks inventory                                   # hookable functions, and which are hooked
+scry hook add Inventory::sell_one self=true            # returns {"hook": 1, ...}
+scry hook wait 1 timeout=60 'result != () && args.index == 2'
+scry hook read 1                                       # every recorded call, with a cursor for the next read
+scry hook remove 1
+```
+
+- **Snapshots:** arguments and results are snapshots taken during the call, `depth=2` levels deep by
+  default, with `self` when `self=true`. A buffer keeps the last `capacity=1000` calls.
+- **Panics and async:** a panic is recorded with its message and then continues as before. An
+  `async fn` is recorded when its work completes.
+- **Waiting:** `hook wait` takes `key=value` options, then an optional Rhai predicate over `args`,
+  `result`, `panic`, `instance` (the captured `self`), `seq`, `duration_micros` and `thread`. It
+  waits on the endpoint's connection thread, so a long wait never holds a Dioxus app's UI thread.
+- **Scripts** can use `hook_add`, `hook_read` and `hook_remove`.
+- **Expiry:** a hook expires after `ttl=30m` without a `read` or `wait`.
+- **Cost:** while no hook is on a function, its hook point costs one atomic load per call. That was
+  below what a release-build benchmark could measure.
+- **Capturing never disturbs the function.** A busy lock shows as `<locked: ...>` rather than being
+  waited for, a failed capture is only counted, and calls made while capturing aren't recorded.
+
+Hooks are on by default. A crate can turn them off, or exclude hot or sensitive functions, in its
+`Cargo.toml` (`[workspace.metadata.scry.hooks]` sets the same keys for a whole workspace):
+
+```toml
+[package.metadata.scry.hooks]
+enabled = true                                  # false builds the crate without hook points
+exclude = ["crate::util::next_random", "crate::auth::*"]
+```
+
+**No hook point**, each listed in `scry-report.txt` with the reason:
+- `const` and `unsafe` functions, `#[track_caller]`
+- functions returning `!` or `impl Trait`
+- a body starting with an inner attribute
+- `main`, tests, UI components, and functions under unknown attribute macros
+
+If a crate doesn't compile with its hook points, `cargo scry` builds it again without them and warns.
+`SCRY_VERBOSE=1` shows why. See [docs/design/hooks.md](docs/design/hooks.md) for the design.
+
 ## What gets generated
 
 `cargo scry` compiles a rewritten copy of each opted-in crate. The copy and a `scry-report.txt` listing
@@ -161,6 +206,7 @@ every line where it was, so errors, panics and the debugger still point at the o
 - reflection through `Box<dyn Trait>` for every trait that can be used as `dyn Trait`
 - for Dioxus crates, tracking of `use_signal`/`use_signal_sync`/`use_context_provider`/`use_memo` results under `ui.<Component>.<binding>`
 - a call shim for every callable function and method (see above)
+- a hook point in every hookable function (see above)
 - the endpoint, started at the top of `main` (and, for Dioxus, pumped from the launched root component)
 
 The endpoint listens on `127.0.0.1` on a port the OS picks. It writes a descriptor holding the pid, the

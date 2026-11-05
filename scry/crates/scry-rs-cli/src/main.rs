@@ -23,12 +23,15 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 
-const USAGE: &str = "\
-usage: scry list
+const USAGE: &str = "usage: scry list
        scry [--pid N | --process NAME] <command>
 
 commands: roots | ls <path> | get <path> [depth] | set <path> <json> | help
-          eval <rhai script> | eval --file <path> | eval -   (script from stdin)";
+          call <function or path.method> [json args...] | fns [filter]
+          eval <rhai script> | eval --file <path> | eval -   (script from stdin)
+          hooks [filter] | hook add <function> [depth=2] [capacity=1000] [self=true] [ttl=30m]
+          hook read <id> [cursor] | hook wait <id> [timeout=30s] [cursor=n] [<rhai predicate>]
+          hook remove <id> | hook clear";
 
 /// Must match `scry::endpoint::targets_dir`.
 fn targets_dir() -> PathBuf {
@@ -181,7 +184,8 @@ fn send(target: &Target, command: &str) -> Result<Value, String> {
     let token = target.descriptor["token"].as_str().ok_or("the descriptor has no token")?;
     let mut stream =
         TcpStream::connect_timeout(&target.address, Duration::from_secs(2)).map_err(|error| error.to_string())?;
-    stream.set_read_timeout(Some(Duration::from_secs(30))).map_err(|error| error.to_string())?;
+    // `hook wait` may take up to five minutes by design.
+    stream.set_read_timeout(Some(Duration::from_secs(330))).map_err(|error| error.to_string())?;
     writeln!(stream, "{}", json!({ "token": token, "command": command })).map_err(|error| error.to_string())?;
     let mut line = String::new();
     BufReader::new(stream).read_line(&mut line).map_err(|error| error.to_string())?;

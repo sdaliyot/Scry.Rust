@@ -900,6 +900,20 @@ impl<T: Reflect> Reflect for OnceLock<T> {
 
 // --- Locks -------------------------------------------------------------------------------------
 
+thread_local! {
+    /// Set while a hook captures a call: locks are then tried once, never waited for, because the
+    /// capture runs on the app's own thread, which may already hold the lock.
+    static NO_WAIT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Runs `f` with lock acquisition not waiting; see [`NO_WAIT`].
+pub(crate) fn without_waiting<R>(f: impl FnOnce() -> R) -> R {
+    let was = NO_WAIT.replace(true);
+    let result = f();
+    NO_WAIT.set(was);
+    result
+}
+
 /// Locks for the registry, waiting at most [`LOCK_TIMEOUT`] for the app to let go.
 fn acquire<'a, G>(
     type_name: &'static str,
@@ -915,7 +929,9 @@ fn acquire<'a, G>(
             Err(TryLockError::Poisoned(poisoned)) => {
                 return Ok(Held { guard: Some(poisoned.into_inner()), clear_poison: None });
             }
-            Err(TryLockError::WouldBlock) if Instant::now() < deadline => thread::sleep(Duration::from_millis(1)),
+            Err(TryLockError::WouldBlock) if Instant::now() < deadline && !NO_WAIT.get() => {
+                thread::sleep(Duration::from_millis(1))
+            }
             Err(TryLockError::WouldBlock) => return Err(Error::LockBusy { type_name }),
         }
     }
@@ -981,7 +997,7 @@ impl<T: Reflect + ?Sized> Reflect for Mutex<T> {
     fn snapshot(&self, depth: usize) -> Value {
         match acquire(self.type_name(), || self.try_lock(), &|| self.clear_poison()) {
             Ok(guard) => guard.snapshot(depth),
-            Err(_) => Value::String(format!("<locked: {}>", self.type_name())),
+            Err(_) => Value::String(format!("<locked: {}>", crate::reflect::short_type_name(self.type_name()))),
         }
     }
 
@@ -1026,7 +1042,7 @@ impl<T: Reflect + ?Sized> Reflect for RwLock<T> {
     fn snapshot(&self, depth: usize) -> Value {
         match acquire(self.type_name(), || self.try_read(), &|| self.clear_poison()) {
             Ok(guard) => guard.snapshot(depth),
-            Err(_) => Value::String(format!("<locked: {}>", self.type_name())),
+            Err(_) => Value::String(format!("<locked: {}>", crate::reflect::short_type_name(self.type_name()))),
         }
     }
 

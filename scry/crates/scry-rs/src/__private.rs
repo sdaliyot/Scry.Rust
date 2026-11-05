@@ -135,6 +135,20 @@ pub use crate::from_value::{
     ViaRefNone, ViaRefOwned, ViaRefValue,
 };
 
+pub use crate::hooks::{CallGuard, Capture, HookSite};
+
+/// Runs a hooked function's body. Taking it as `FnOnce` makes the closure one, so the body can
+/// return what it reborrows from its captured parameters (`&mut self.field`), as the function
+/// itself could.
+#[inline(always)]
+pub fn run_once<R>(body: impl FnOnce() -> R) -> R {
+    body()
+}
+
+/// Every function the generator compiled a hook point into, from every crate.
+#[linkme::distributed_slice]
+pub static HOOK_SITES: [&'static HookSite];
+
 /// Every function the generator made callable, from every crate.
 #[linkme::distributed_slice]
 pub static FUNCTIONS: [Function];
