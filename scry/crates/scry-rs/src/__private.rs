@@ -131,8 +131,8 @@ impl<T> ViaOpaqueOwned for ProbeOwned<'_, T> {
 
 pub use crate::call::{Function, Receiver, This};
 pub use crate::from_value::{
-    ArgProbe, FromValue, RefProbe, SelfProbe, Unconstructible, ViaClone, ViaFromValue, ViaNoClone, ViaNoValue, ViaRefNone,
-    ViaRefOwned, ViaRefValue,
+    ArgProbe, FromValue, RefProbe, SelfProbe, Unconstructible, ViaClone, ViaFromValue, ViaNoClone, ViaNoValue,
+    ViaRefNone, ViaRefOwned, ViaRefValue,
 };
 
 /// Every function the generator made callable, from every crate.

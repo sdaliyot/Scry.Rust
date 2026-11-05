@@ -23,9 +23,35 @@ pub const GENERATOR_ID: &str = "SCRY_GENERATOR_ID";
 
 /// rustc options whose value is the next argument, so it is not taken for the source file.
 const TAKES_VALUE: &[&str] = &[
-    "--crate-name", "--edition", "--crate-type", "--emit", "--out-dir", "-o", "-L", "-l", "--extern", "--cfg",
-    "--check-cfg", "-C", "--codegen", "--cap-lints", "--error-format", "--json", "--target", "--remap-path-prefix",
-    "-A", "-W", "-D", "-F", "--force-warn", "--print", "--diagnostic-width", "--sysroot", "--color", "-Z", "--explain",
+    "--crate-name",
+    "--edition",
+    "--crate-type",
+    "--emit",
+    "--out-dir",
+    "-o",
+    "-L",
+    "-l",
+    "--extern",
+    "--cfg",
+    "--check-cfg",
+    "-C",
+    "--codegen",
+    "--cap-lints",
+    "--error-format",
+    "--json",
+    "--target",
+    "--remap-path-prefix",
+    "-A",
+    "-W",
+    "-D",
+    "-F",
+    "--force-warn",
+    "--print",
+    "--diagnostic-width",
+    "--sysroot",
+    "--color",
+    "-Z",
+    "--explain",
 ];
 
 struct Invocation {
@@ -55,11 +81,7 @@ impl Invocation {
     fn values<'a>(&'a self, option: &'a str) -> impl Iterator<Item = &'a str> + 'a {
         let joined = format!("{option}=");
         self.args.iter().enumerate().filter_map(move |(index, arg)| {
-            if arg == option {
-                self.args.get(index + 1).map(String::as_str)
-            } else {
-                arg.strip_prefix(joined.as_str())
-            }
+            if arg == option { self.args.get(index + 1).map(String::as_str) } else { arg.strip_prefix(joined.as_str()) }
         })
     }
 
@@ -74,7 +96,9 @@ impl Invocation {
     }
 
     fn opted_in(&self) -> bool {
-        self.source.is_some() && self.values("--cfg").any(|value| value == "feature=\"scry\"") && self.has_extern("scry")
+        self.source.is_some()
+            && self.values("--cfg").any(|value| value == "feature=\"scry\"")
+            && self.has_extern("scry")
     }
 }
 
@@ -123,7 +147,8 @@ fn rewritten(invocation: &Invocation) -> Result<Rewritten, String> {
     let options = Options {
         dioxus: invocation.has_extern("dioxus"),
         // A test harness supplies its own `main`.
-        executable: invocation.values("--crate-type").any(|kind| kind == "bin") && !invocation.args.iter().any(|arg| arg == "--test"),
+        executable: invocation.values("--crate-type").any(|kind| kind == "bin")
+            && !invocation.args.iter().any(|arg| arg == "--test"),
     };
     let output = rewrite_crate(&root, &paths, &options)?;
 

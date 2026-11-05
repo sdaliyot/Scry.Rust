@@ -88,10 +88,7 @@ mod tests {
     fn parses_members_and_indexes() {
         let (root, segments) = parse("app.items[2].qty").unwrap();
         assert_eq!(root, "app");
-        assert_eq!(
-            segments,
-            vec![Segment::Field("items".into()), Segment::Index(2), Segment::Field("qty".into())]
-        );
+        assert_eq!(segments, vec![Segment::Field("items".into()), Segment::Index(2), Segment::Field("qty".into())]);
     }
 
     #[test]

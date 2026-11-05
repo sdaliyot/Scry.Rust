@@ -125,10 +125,10 @@ fn with_tree<R>(f: impl FnOnce(&BTreeMap<&'static str, Component<'_>>) -> R) -> 
                 .map(|hook| hook.component)
                 .find(|name| !name.starts_with("use_"))
                 .unwrap_or(hooks[0].component);
-            tree.entry(component).or_insert_with(|| Component { instances: Vec::new() }).instances.push(Instance {
-                component,
-                hooks,
-            });
+            tree.entry(component)
+                .or_insert_with(|| Component { instances: Vec::new() })
+                .instances
+                .push(Instance { component, hooks });
         }
         f(&tree)
     })
@@ -210,7 +210,11 @@ impl Reflect for Component<'_> {
     fn members(&self) -> Vec<Member> {
         match self.instances.as_slice() {
             [single] => single.members(),
-            many => many.iter().enumerate().map(|(index, instance)| Member::new(format!("[{index}]"), instance.component)).collect(),
+            many => many
+                .iter()
+                .enumerate()
+                .map(|(index, instance)| Member::new(format!("[{index}]"), instance.component))
+                .collect(),
         }
     }
 
@@ -272,7 +276,9 @@ impl Reflect for Ui {
             return truncated("ui");
         }
         with_tree(|tree| {
-            Value::Object(tree.iter().map(|(name, component)| ((*name).to_owned(), component.snapshot(depth - 1))).collect())
+            Value::Object(
+                tree.iter().map(|(name, component)| ((*name).to_owned(), component.snapshot(depth - 1))).collect(),
+            )
         })
     }
 
@@ -295,9 +301,9 @@ impl Reflect for Ui {
     }
 }
 
-fn component<'a, 'b>(tree: &'a BTreeMap<&'static str, Component<'b>>, segment: &Segment) -> Result<&'a Component<'b>, Error> {
-    segment
-        .field()
-        .and_then(|name| tree.get(name))
-        .ok_or_else(|| crate::__private::no_member("ui", segment))
+fn component<'a, 'b>(
+    tree: &'a BTreeMap<&'static str, Component<'b>>,
+    segment: &Segment,
+) -> Result<&'a Component<'b>, Error> {
+    segment.field().and_then(|name| tree.get(name)).ok_or_else(|| crate::__private::no_member("ui", segment))
 }

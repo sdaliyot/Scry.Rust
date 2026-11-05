@@ -154,8 +154,11 @@ impl Registry {
         let (root, segments) = self.resolve(path)?;
         let mut description = Value::Null;
         root.read(&segments, &mut |value| {
-            let members: Vec<Value> =
-                value.members().into_iter().map(|member| json!({ "name": member.name, "type": member.type_name })).collect();
+            let members: Vec<Value> = value
+                .members()
+                .into_iter()
+                .map(|member| json!({ "name": member.name, "type": member.type_name }))
+                .collect();
             let mut object = Map::new();
             object.insert("path".into(), Value::String(path.trim().to_owned()));
             object.insert("type".into(), Value::String(value.type_name().to_owned()));

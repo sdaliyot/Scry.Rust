@@ -6,26 +6,58 @@ use std::fmt;
 pub enum Error {
     NoSuchRoot(String),
     /// A short root name (`APP`) matches more than one full one (`a::APP`, `b::APP`).
-    AmbiguousRoot { name: String, candidates: Vec<String> },
-    NoSuchMember { type_name: &'static str, member: String },
-    IndexOutOfRange { len: usize, index: usize },
+    AmbiguousRoot {
+        name: String,
+        candidates: Vec<String>,
+    },
+    NoSuchMember {
+        type_name: &'static str,
+        member: String,
+    },
+    IndexOutOfRange {
+        len: usize,
+        index: usize,
+    },
     /// The path continues past a value that has no children (a scalar or an opaque value).
-    NotNavigable { type_name: &'static str },
+    NotNavigable {
+        type_name: &'static str,
+    },
     /// The value is empty (`None`, an unset `OnceLock`) and the path continues into it.
-    Empty { type_name: &'static str },
-    NotWritable { reason: String },
-    TypeMismatch { expected: &'static str, found: String },
+    Empty {
+        type_name: &'static str,
+    },
+    NotWritable {
+        reason: String,
+    },
+    TypeMismatch {
+        expected: &'static str,
+        found: String,
+    },
     /// A lock on the path stayed held by the app for the whole timeout.
-    LockBusy { type_name: &'static str },
+    LockBusy {
+        type_name: &'static str,
+    },
     BadPath(String),
     BadCommand(String),
     NoSuchFunction(String),
     /// A function name matches several functions, or a method name several trait methods.
-    AmbiguousFunction { name: String, candidates: Vec<String> },
-    NoSuchMethod { type_name: &'static str, method: String },
-    ArgumentCount { function: String, expected: usize, found: usize },
+    AmbiguousFunction {
+        name: String,
+        candidates: Vec<String>,
+    },
+    NoSuchMethod {
+        type_name: &'static str,
+        method: String,
+    },
+    ArgumentCount {
+        function: String,
+        expected: usize,
+        found: usize,
+    },
     /// An argument's type cannot be built from JSON.
-    CannotConvert { type_name: &'static str },
+    CannotConvert {
+        type_name: &'static str,
+    },
     /// The function exists but cannot be called this way.
     NotCallable(String),
     /// The called function panicked.
@@ -102,7 +134,9 @@ impl fmt::Display for Error {
             Error::ArgumentCount { function, expected, found } => {
                 write!(f, "{function} takes {expected} argument(s), got {found}")
             }
-            Error::CannotConvert { type_name } => write!(f, "an argument of type {type_name} cannot be built from JSON"),
+            Error::CannotConvert { type_name } => {
+                write!(f, "an argument of type {type_name} cannot be built from JSON")
+            }
             Error::NotCallable(message) => write!(f, "not callable: {message}"),
             Error::Panicked(message) => write!(f, "panicked in {message}"),
             Error::Script(message) => write!(f, "script error: {message}"),

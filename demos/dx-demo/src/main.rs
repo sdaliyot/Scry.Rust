@@ -101,8 +101,7 @@ fn FilterBar() -> Element {
 fn TaskList() -> Element {
     let mut board = use_context::<Signal<Board>>();
     let filter = *FILTER.read();
-    let visible: Vec<model::Task> =
-        board.read().tasks().iter().filter(|task| filter.matches(task)).cloned().collect();
+    let visible: Vec<model::Task> = board.read().tasks().iter().filter(|task| filter.matches(task)).cloned().collect();
 
     rsx! {
         ul {

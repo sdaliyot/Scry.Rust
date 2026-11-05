@@ -139,7 +139,11 @@ fn scan_includes(stream: TokenStream, source: &Source, found: &mut Vec<Include>)
                 if let Some(path) = string_value(literal)
                     && std::path::Path::new(&path).is_relative()
                 {
-                    found.push(Include::Relative { start: source.start(literal.span()), end: source.end(literal.span()), path });
+                    found.push(Include::Relative {
+                        start: source.start(literal.span()),
+                        end: source.end(literal.span()),
+                        path,
+                    });
                 }
             }
             ("include", [TokenTree::Ident(concat), TokenTree::Punct(bang), TokenTree::Group(parts)])
@@ -162,9 +166,13 @@ fn scan_includes(stream: TokenStream, source: &Source, found: &mut Vec<Include>)
 fn out_dir_file(parts: &Group) -> Option<String> {
     let parts: Vec<TokenTree> = parts.stream().into_iter().collect();
     match parts.as_slice() {
-        [TokenTree::Ident(env), TokenTree::Punct(bang), TokenTree::Group(var), TokenTree::Punct(comma), TokenTree::Literal(file)]
-            if env == "env" && bang.as_char() == '!' && comma.as_char() == ',' =>
-        {
+        [
+            TokenTree::Ident(env),
+            TokenTree::Punct(bang),
+            TokenTree::Group(var),
+            TokenTree::Punct(comma),
+            TokenTree::Literal(file),
+        ] if env == "env" && bang.as_char() == '!' && comma.as_char() == ',' => {
             let var: Vec<TokenTree> = var.stream().into_iter().collect();
             match var.as_slice() {
                 [TokenTree::Literal(name)] if string_value(name).as_deref() == Some("OUT_DIR") => {
@@ -179,7 +187,11 @@ fn out_dir_file(parts: &Group) -> Option<String> {
 
 /// Steps back over a path such as `tonic::include_proto` or `::tonic::include_proto`.
 fn path_start(tokens: &[TokenTree], mut index: usize) -> usize {
-    while index >= 3 && is_punct(&tokens[index - 1], ':') && is_punct(&tokens[index - 2], ':') && matches!(tokens[index - 3], TokenTree::Ident(_)) {
+    while index >= 3
+        && is_punct(&tokens[index - 1], ':')
+        && is_punct(&tokens[index - 2], ':')
+        && matches!(tokens[index - 3], TokenTree::Ident(_))
+    {
         index -= 3;
     }
     if index >= 2 && is_punct(&tokens[index - 1], ':') && is_punct(&tokens[index - 2], ':') {
@@ -210,7 +222,8 @@ mod tests {
 
     #[test]
     fn derives_types_in_macro_templates_only() {
-        let text = "macro_rules! id {\n    (struct $name:ident) => { $vis struct $name(u64); pub(crate) enum E { A } };\n}";
+        let text =
+            "macro_rules! id {\n    (struct $name:ident) => { $vis struct $name(u64); pub(crate) enum E { A } };\n}";
         let out = apply_templates(text);
         assert!(out.contains("(struct $name:ident)"), "{out}");
         assert!(out.contains("#[derive(::scry::Reflect)] $vis struct $name"), "{out}");
@@ -228,7 +241,11 @@ const B: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/b.txt"));"#;
         let found = includes(&source);
         assert_eq!(found.len(), 3);
         assert!(matches!(&found[0], Include::Relative { path, .. } if path == "../a.txt"));
-        assert!(matches!(&found[1], Include::BuildOutput { file, start, .. } if file == "gen.rs" && &text[*start..*start + 8] == "include!"));
-        assert!(matches!(&found[2], Include::BuildOutput { file, start, .. } if file == "hello.rs" && text[*start..].starts_with("tonic::")));
+        assert!(
+            matches!(&found[1], Include::BuildOutput { file, start, .. } if file == "gen.rs" && &text[*start..*start + 8] == "include!")
+        );
+        assert!(
+            matches!(&found[2], Include::BuildOutput { file, start, .. } if file == "hello.rs" && text[*start..].starts_with("tonic::"))
+        );
     }
 }

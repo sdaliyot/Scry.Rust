@@ -3,9 +3,7 @@
 use std::any::type_name;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Display;
-use std::sync::atomic::{
-    AtomicBool, AtomicI32, AtomicI64, AtomicIsize, AtomicU32, AtomicU64, AtomicUsize, Ordering,
-};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicIsize, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, OnceLock, RwLock, TryLockError, TryLockResult};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -139,7 +137,8 @@ impl Reflect for char {
     leaf_access!();
 
     fn assign(&mut self, value: &Value) -> Result<(), Error> {
-        let mut chars = value.as_str().map(str::chars).ok_or_else(|| Error::mismatch("a one-character string", value))?;
+        let mut chars =
+            value.as_str().map(str::chars).ok_or_else(|| Error::mismatch("a one-character string", value))?;
         match (chars.next(), chars.next()) {
             (Some(c), None) => {
                 *self = c;
@@ -222,7 +221,8 @@ impl Reflect for Duration {
 
     fn assign(&mut self, value: &Value) -> Result<(), Error> {
         let seconds = value.as_f64().ok_or_else(|| Error::mismatch("a number of seconds", value))?;
-        *self = Duration::try_from_secs_f64(seconds).map_err(|_| Error::mismatch("a non-negative number of seconds", value))?;
+        *self = Duration::try_from_secs_f64(seconds)
+            .map_err(|_| Error::mismatch("a non-negative number of seconds", value))?;
         Ok(())
     }
 }

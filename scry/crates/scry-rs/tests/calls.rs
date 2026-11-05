@@ -141,7 +141,8 @@ fn sprite(name: &str) -> Sprite {
 }
 
 fn registry() -> (Registry, Arc<Scene>) {
-    let scene = Arc::new(Scene { sprites: Mutex::new(vec![sprite("ant"), sprite("bee")]), frozen: vec![sprite("cat")] });
+    let scene =
+        Arc::new(Scene { sprites: Mutex::new(vec![sprite("ant"), sprite("bee")]), frozen: vec![sprite("cat")] });
     let mut registry = Registry::new();
     registry.add("scene", Arc::clone(&scene));
     (registry, scene)
@@ -174,13 +175,23 @@ fn arguments_are_built_from_json() {
     let built = json!({ "name": "eel", "shape": { "Pair": [2, 3] }, "tags": ["x"], "hidden": true });
     let snapshot = registry.call("build", &[built], 3).unwrap();
     assert_eq!(snapshot["shape"], json!({ "Pair": { "0": 2, "1": 3 } }));
-    assert_eq!(registry.call("build", std::slice::from_ref(&snapshot), 3).unwrap(), snapshot, "a snapshot builds the same value");
+    assert_eq!(
+        registry.call("build", std::slice::from_ref(&snapshot), 3).unwrap(),
+        snapshot,
+        "a snapshot builds the same value"
+    );
     let sparse = registry.call("calls::build", &[json!({ "name": "fly", "shape": "Dot", "tags": [] })], 3).unwrap();
     assert_eq!(sparse["hidden"], json!(null));
     assert_eq!(registry.call("total", &[json!([1, 2, 3])], 3).unwrap(), json!(6));
 
-    assert_eq!(code(registry.call("build", &[json!({ "name": "x", "shape": "Square", "tags": [] })], 3)), "type_mismatch");
-    assert_eq!(code(registry.call("build", &[json!({ "name": "x", "shape": "Dot", "tags": [], "extra": 1 })], 3)), "no_such_member");
+    assert_eq!(
+        code(registry.call("build", &[json!({ "name": "x", "shape": "Square", "tags": [] })], 3)),
+        "type_mismatch"
+    );
+    assert_eq!(
+        code(registry.call("build", &[json!({ "name": "x", "shape": "Dot", "tags": [], "extra": 1 })], 3)),
+        "no_such_member"
+    );
     assert_eq!(code(registry.call("scene.sprites[0].label", &[json!("x"), json!(-1)], 3)), "type_mismatch");
     assert_eq!(code(registry.call("opaque", &[json!(1)], 3)), "cannot_convert");
 }

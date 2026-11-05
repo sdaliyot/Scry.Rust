@@ -29,8 +29,25 @@ use crate::edits::Source;
 /// it (`#[component]` turns a function into one taking a props struct), so the shim would not
 /// match.
 const INERT_ATTRIBUTES: &[&str] = &[
-    "doc", "allow", "warn", "deny", "forbid", "expect", "inline", "must_use", "cfg", "cfg_attr", "deprecated",
-    "track_caller", "cold", "no_mangle", "export_name", "link_section", "rustfmt", "clippy", "instrument",
+    "doc",
+    "allow",
+    "warn",
+    "deny",
+    "forbid",
+    "expect",
+    "inline",
+    "must_use",
+    "cfg",
+    "cfg_attr",
+    "deprecated",
+    "track_caller",
+    "cold",
+    "no_mangle",
+    "export_name",
+    "link_section",
+    "rustfmt",
+    "clippy",
+    "instrument",
 ];
 
 /// The first attribute that is not known to leave the item as written.
@@ -38,8 +55,10 @@ pub fn unknown_attribute(attrs: &[Attribute]) -> Option<String> {
     attrs
         .iter()
         .map(|attr| attr.path())
-        .find(|path| !path.segments.first().is_some_and(|first| INERT_ATTRIBUTES.contains(&first.ident.to_string().as_str()))
-            && !path.segments.last().is_some_and(|last| last.ident == "instrument"))
+        .find(|path| {
+            !path.segments.first().is_some_and(|first| INERT_ATTRIBUTES.contains(&first.ident.to_string().as_str()))
+                && !path.segments.last().is_some_and(|last| last.ident == "instrument")
+        })
         .map(|path| path.segments.iter().map(|segment| segment.ident.to_string()).collect::<Vec<_>>().join("::"))
 }
 
@@ -98,7 +117,9 @@ pub fn shim(source: &Source, attrs: &[Attribute], sig: &Signature, callee: &Call
                 let self_ty = callee.self_ty.ok_or("it takes self outside an impl")?;
                 let mutable = match (&receiver_arg.reference, &*receiver_arg.ty) {
                     (Some(_), _) => Some(receiver_arg.mutability.is_some()),
-                    (None, Type::Reference(reference)) if is_self(&reference.elem) => Some(reference.mutability.is_some()),
+                    (None, Type::Reference(reference)) if is_self(&reference.elem) => {
+                        Some(reference.mutability.is_some())
+                    }
                     (None, ty) if is_self(ty) => None,
                     _ => return Err("it takes self through a smart pointer".into()),
                 };
@@ -146,9 +167,10 @@ pub fn shim(source: &Source, attrs: &[Attribute], sig: &Signature, callee: &Call
 
     let ident = &sig.ident;
     let (callee_tokens, path) = match (callee.self_ty, callee.trait_path) {
-        (Some(self_ty), Some(trait_path)) => {
-            (quote!(<#self_ty as #trait_path>::#ident), format!("<{} as {}>::{name}", compact(self_ty), compact(trait_path)))
-        }
+        (Some(self_ty), Some(trait_path)) => (
+            quote!(<#self_ty as #trait_path>::#ident),
+            format!("<{} as {}>::{name}", compact(self_ty), compact(trait_path)),
+        ),
         (Some(self_ty), None) => (quote!(<#self_ty>::#ident), format!("{}::{name}", compact(self_ty))),
         (None, _) => (quote!(#ident), name.clone()),
     };
@@ -168,7 +190,8 @@ pub fn shim(source: &Source, attrs: &[Attribute], sig: &Signature, callee: &Call
     };
     let signature = signature_text(source, sig);
     let path = format!("::{path}");
-    let unique = quote::format_ident!("__SCRY_FN_{}_{}", sig.ident.span().start().line, sig.ident.span().start().column);
+    let unique =
+        quote::format_ident!("__SCRY_FN_{}_{}", sig.ident.span().start().line, sig.ident.span().start().column);
 
     let cfgs = &callee.cfgs;
     let shim = quote! {
@@ -284,7 +307,11 @@ fn signature_text(source: &Source, sig: &Signature) -> String {
     };
     let end = sig.generics.where_clause.as_ref().map_or(end, |clause| clause.span());
     let (start, end) = (source.start(sig.span()), source.end(end));
-    let text = source.text.get(start..end).filter(|_| start < end).map_or_else(|| sig.to_token_stream().to_string(), str::to_owned);
+    let text = source
+        .text
+        .get(start..end)
+        .filter(|_| start < end)
+        .map_or_else(|| sig.to_token_stream().to_string(), str::to_owned);
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 

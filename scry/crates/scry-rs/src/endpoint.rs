@@ -64,9 +64,8 @@ pub fn listen(dispatch: impl Fn(Job) -> bool + Send + Sync + 'static) -> io::Res
         for stream in listener.incoming().flatten() {
             let dispatch = std::sync::Arc::clone(&dispatch);
             let token = token.clone();
-            let _ = thread::Builder::new()
-                .name("scry-connection".into())
-                .spawn(move || serve(stream, &token, &*dispatch));
+            let _ =
+                thread::Builder::new().name("scry-connection".into()).spawn(move || serve(stream, &token, &*dispatch));
         }
     })?;
     Ok(())

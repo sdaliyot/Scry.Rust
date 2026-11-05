@@ -33,13 +33,20 @@ fn run(registry: &Registry, line: &str, output: &mut Vec<String>) -> Result<Valu
     let (verb, rest) = line.split_once(char::is_whitespace).map_or((line, ""), |(verb, rest)| (verb, rest.trim()));
     match verb {
         "roots" => Ok(json!(
-            registry.roots().into_iter().map(|root| json!({ "name": root.name, "type": root.type_name })).collect::<Vec<_>>()
+            registry
+                .roots()
+                .into_iter()
+                .map(|root| json!({ "name": root.name, "type": root.type_name }))
+                .collect::<Vec<_>>()
         )),
         "ls" => registry.describe(required(rest, "a path")?),
         "get" => {
-            let (path, depth) = rest.split_once(char::is_whitespace).map_or((rest, None), |(path, depth)| (path, Some(depth)));
+            let (path, depth) =
+                rest.split_once(char::is_whitespace).map_or((rest, None), |(path, depth)| (path, Some(depth)));
             let depth = match depth {
-                Some(depth) => depth.trim().parse().map_err(|_| Error::BadCommand(format!("'{depth}' is not a depth")))?,
+                Some(depth) => {
+                    depth.trim().parse().map_err(|_| Error::BadCommand(format!("'{depth}' is not a depth")))?
+                }
                 None => DEFAULT_DEPTH,
             };
             registry.get(required(path, "a path")?, depth)
@@ -77,7 +84,9 @@ fn run(registry: &Registry, line: &str, output: &mut Vec<String>) -> Result<Valu
 fn arguments(text: &str) -> Vec<Value> {
     let parsed: Result<Vec<Value>, _> = serde_json::Deserializer::from_str(text).into_iter::<Value>().collect();
     parsed.unwrap_or_else(|_| {
-        text.split_whitespace().map(|word| serde_json::from_str(word).unwrap_or_else(|_| Value::String(word.to_owned()))).collect()
+        text.split_whitespace()
+            .map(|word| serde_json::from_str(word).unwrap_or_else(|_| Value::String(word.to_owned())))
+            .collect()
     })
 }
 

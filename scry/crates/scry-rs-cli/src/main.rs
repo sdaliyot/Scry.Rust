@@ -73,11 +73,13 @@ fn targets() -> Vec<Target> {
         if path.extension().is_none_or(|extension| extension != "json") {
             continue;
         }
-        let Some(descriptor) = fs::read_to_string(&path).ok().and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        let Some(descriptor) =
+            fs::read_to_string(&path).ok().and_then(|text| serde_json::from_str::<Value>(&text).ok())
         else {
             continue;
         };
-        let Some(address) = descriptor["address"].as_str().and_then(|address| address.parse::<SocketAddr>().ok()) else {
+        let Some(address) = descriptor["address"].as_str().and_then(|address| address.parse::<SocketAddr>().ok())
+        else {
             continue;
         };
         if !address.ip().is_loopback() {
@@ -140,8 +142,12 @@ fn main() -> ExitCode {
         [target] => target,
         [] => return fail("no_target", "no matching running target; see `scry list`"),
         many => {
-            let pids: Vec<String> = many.iter().map(|target| format!("{} ({})", target.pid(), target.process())).collect();
-            return fail("ambiguous_target", &format!("several targets match, pick one with --pid: {}", pids.join(", ")));
+            let pids: Vec<String> =
+                many.iter().map(|target| format!("{} ({})", target.pid(), target.process())).collect();
+            return fail(
+                "ambiguous_target",
+                &format!("several targets match, pick one with --pid: {}", pids.join(", ")),
+            );
         }
     };
 
@@ -173,7 +179,8 @@ fn command(args: &[String]) -> Result<String, String> {
 
 fn send(target: &Target, command: &str) -> Result<Value, String> {
     let token = target.descriptor["token"].as_str().ok_or("the descriptor has no token")?;
-    let mut stream = TcpStream::connect_timeout(&target.address, Duration::from_secs(2)).map_err(|error| error.to_string())?;
+    let mut stream =
+        TcpStream::connect_timeout(&target.address, Duration::from_secs(2)).map_err(|error| error.to_string())?;
     stream.set_read_timeout(Some(Duration::from_secs(30))).map_err(|error| error.to_string())?;
     writeln!(stream, "{}", json!({ "token": token, "command": command })).map_err(|error| error.to_string())?;
     let mut line = String::new();

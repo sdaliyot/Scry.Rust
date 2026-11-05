@@ -50,13 +50,34 @@ const ASSIGN_DEPTH: usize = 64;
 
 /// Names scripts already use; app functions of these names are reached through `call` only.
 const RESERVED: &[&str] = &[
-    "get", "set", "members", "children", "len", "type_name", "kind", "path", "to_string", "to_debug", "call", "invoke", "root",
-    "roots", "print", "debug", "type_of", "eval",
+    "get",
+    "set",
+    "members",
+    "children",
+    "len",
+    "type_name",
+    "kind",
+    "path",
+    "to_string",
+    "to_debug",
+    "call",
+    "invoke",
+    "root",
+    "roots",
+    "print",
+    "debug",
+    "type_of",
+    "eval",
 ];
 
 /// Runs `source` and returns its last value as JSON, nodes as snapshots `depth` levels deep.
 /// What the script prints is appended to `output`, also when it fails.
-pub(crate) fn evaluate(registry: &Registry, source: &str, depth: usize, output: &mut Vec<String>) -> Result<Value, Error> {
+pub(crate) fn evaluate(
+    registry: &Registry,
+    source: &str,
+    depth: usize,
+    output: &mut Vec<String>,
+) -> Result<Value, Error> {
     let registry = Rc::new(registry.share());
     let printed = Rc::new(RefCell::new(Vec::new()));
     let engine = engine(&registry, &printed);
@@ -134,7 +155,9 @@ fn engine(registry: &Rc<Registry>, printed: &Rc<RefCell<Vec<String>>>) -> Engine
         shared.call(target, &args, RESULT_DEPTH).map(|value| to_dynamic(&value)).map_err(raise)
     });
     let shared = Rc::clone(registry);
-    engine.register_fn("invoke", move |target: &str| shared.call(target, &[], RESULT_DEPTH).map(|value| to_dynamic(&value)).map_err(raise));
+    engine.register_fn("invoke", move |target: &str| {
+        shared.call(target, &[], RESULT_DEPTH).map(|value| to_dynamic(&value)).map_err(raise)
+    });
     for (name, arity) in call::method_names() {
         if RESERVED.contains(&name) {
             continue;
@@ -163,7 +186,9 @@ fn engine(registry: &Rc<Registry>, printed: &Rc<RefCell<Vec<String>>>) -> Engine
     let shared = Rc::clone(registry);
     engine.register_fn("root", move |name: &str| Node::root(&shared, name).map_err(raise));
     let shared = Rc::clone(registry);
-    engine.register_fn("get", move |path: &str| shared.get(path, crate::command::DEFAULT_DEPTH).map(|value| to_dynamic(&value)).map_err(raise));
+    engine.register_fn("get", move |path: &str| {
+        shared.get(path, crate::command::DEFAULT_DEPTH).map(|value| to_dynamic(&value)).map_err(raise)
+    });
     let shared = Rc::clone(registry);
     engine.register_fn("get", move |path: &str, depth: INT| {
         shared.get(path, depth.max(0) as usize).map(|value| to_dynamic(&value)).map_err(raise)
@@ -291,7 +316,9 @@ impl Node {
 
     fn call(&self, method: &str, args: &[Dynamic]) -> Result<Dynamic, Error> {
         let args = json_args(args)?;
-        self.registry.call_method_at(&self.root, &self.segments, method, &args, RESULT_DEPTH).map(|value| to_dynamic(&value))
+        self.registry
+            .call_method_at(&self.root, &self.segments, method, &args, RESULT_DEPTH)
+            .map(|value| to_dynamic(&value))
     }
 
     fn assign(&self, value: &Dynamic) -> Result<(), Error> {
@@ -347,9 +374,9 @@ fn failure(error: &EvalAltResult) -> Error {
     match error.unwrap_inner() {
         EvalAltResult::ErrorRuntime(value, _) if value.is::<Error>() => value.clone().cast::<Error>(),
         EvalAltResult::ErrorTerminated(..) => Error::ScriptLimit(format!("ran longer than {} s", TIME_LIMIT.as_secs())),
-        EvalAltResult::ErrorTooManyOperations(_) | EvalAltResult::ErrorDataTooLarge(..) | EvalAltResult::ErrorStackOverflow(_) => {
-            Error::ScriptLimit(error.to_string())
-        }
+        EvalAltResult::ErrorTooManyOperations(_)
+        | EvalAltResult::ErrorDataTooLarge(..)
+        | EvalAltResult::ErrorStackOverflow(_) => Error::ScriptLimit(error.to_string()),
         _ => Error::Script(error.to_string()),
     }
 }
@@ -364,7 +391,9 @@ fn to_dynamic(value: &Value) -> Dynamic {
         },
         Value::String(value) => value.clone().into(),
         Value::Array(items) => Dynamic::from_array(items.iter().map(to_dynamic).collect()),
-        Value::Object(fields) => Dynamic::from_map(fields.iter().map(|(name, value)| (name.into(), to_dynamic(value))).collect()),
+        Value::Object(fields) => {
+            Dynamic::from_map(fields.iter().map(|(name, value)| (name.into(), to_dynamic(value))).collect())
+        }
     }
 }
 

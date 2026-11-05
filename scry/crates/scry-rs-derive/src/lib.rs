@@ -229,14 +229,20 @@ fn expand_struct(fields: &Fields) -> Tokens {
     let imports = probe_imports();
     let names: Vec<&String> = fields.iter().map(|field| &field.name).collect();
     let types: Vec<&Type> = fields.iter().map(|field| field.ty).collect();
-    let reads: Vec<Tokens> = fields.iter().map(|field| {
-        let member = &field.member;
-        read_probe(quote!(&self.#member))
-    }).collect();
-    let writes: Vec<Tokens> = fields.iter().map(|field| {
-        let member = &field.member;
-        write_probe(quote!(&mut self.#member))
-    }).collect();
+    let reads: Vec<Tokens> = fields
+        .iter()
+        .map(|field| {
+            let member = &field.member;
+            read_probe(quote!(&self.#member))
+        })
+        .collect();
+    let writes: Vec<Tokens> = fields
+        .iter()
+        .map(|field| {
+            let member = &field.member;
+            write_probe(quote!(&mut self.#member))
+        })
+        .collect();
 
     quote! {
         fn kind(&self) -> ::scry::Kind {
@@ -342,14 +348,20 @@ fn expand_enum(data: &DataEnum) -> Tokens {
         let variant_name = variant.ident.unraw().to_string();
         let names: Vec<&String> = fields.iter().map(|field| &field.name).collect();
         let types: Vec<&Type> = fields.iter().map(|field| field.ty).collect();
-        let reads: Vec<Tokens> = fields.iter().map(|field| {
-            let binding = &field.binding;
-            read_probe(quote!(#binding))
-        }).collect();
-        let writes: Vec<Tokens> = fields.iter().map(|field| {
-            let binding = &field.binding;
-            write_probe(quote!(#binding))
-        }).collect();
+        let reads: Vec<Tokens> = fields
+            .iter()
+            .map(|field| {
+                let binding = &field.binding;
+                read_probe(quote!(#binding))
+            })
+            .collect();
+        let writes: Vec<Tokens> = fields
+            .iter()
+            .map(|field| {
+                let binding = &field.binding;
+                write_probe(quote!(#binding))
+            })
+            .collect();
 
         if fields.is_empty() {
             unit_variants.push((variant.ident.clone(), variant_name.clone()));

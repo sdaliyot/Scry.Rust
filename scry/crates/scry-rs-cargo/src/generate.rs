@@ -76,7 +76,13 @@ pub struct Generator<'a> {
 }
 
 impl<'a> Generator<'a> {
-    pub fn new(source: &'a Source, edits: &'a mut Edits, cx: &'a Context<'a>, report: &'a mut Report, entry: bool) -> Self {
+    pub fn new(
+        source: &'a Source,
+        edits: &'a mut Edits,
+        cx: &'a Context<'a>,
+        report: &'a mut Report,
+        entry: bool,
+    ) -> Self {
         Self { source, edits, cx, report, entry, inline_mods: 0, fns: Vec::new() }
     }
 
@@ -89,7 +95,11 @@ impl<'a> Generator<'a> {
         let call = if self.entry && name == "main" {
             if self.cx.hooks {
                 if roots.is_empty() {
-                    self.report.skipped("endpoint", "main", "no `launch(Component)` found, so nothing runs the registry");
+                    self.report.skipped(
+                        "endpoint",
+                        "main",
+                        "no `launch(Component)` found, so nothing runs the registry",
+                    );
                 }
                 "::scry::__private::dioxus::start_endpoint(); "
             } else {
@@ -268,7 +278,10 @@ impl Generator<'_> {
         let reason = functions::impl_skip_reason(&item.generics, &item.self_ty)
             .map(str::to_owned)
             .or_else(|| item.unsafety.map(|_| "it is an unsafe impl".to_owned()))
-            .or_else(|| functions::unknown_attribute(&item.attrs).map(|attribute| format!("its #[{attribute}] attribute may rewrite it")));
+            .or_else(|| {
+                functions::unknown_attribute(&item.attrs)
+                    .map(|attribute| format!("its #[{attribute}] attribute may rewrite it"))
+            });
         if let Some(reason) = reason {
             if item.items.iter().any(|item| matches!(item, syn::ImplItem::Fn(_))) {
                 self.report.skipped("impl", &label, &format!("methods not callable: {reason}"));
@@ -456,7 +469,10 @@ fn has_maybe_sized(generics: &syn::Generics) -> bool {
     };
     generics.type_params().any(|param| maybe(&param.bounds))
         || generics.where_clause.as_ref().is_some_and(|clause| {
-            clause.predicates.iter().any(|predicate| matches!(predicate, WherePredicate::Type(predicate) if maybe(&predicate.bounds)))
+            clause
+                .predicates
+                .iter()
+                .any(|predicate| matches!(predicate, WherePredicate::Type(predicate) if maybe(&predicate.bounds)))
         })
 }
 
@@ -512,7 +528,13 @@ impl<'ast> Visit<'ast> for ModCollector<'_> {
                 Visibility::Inherited => self.source.start(item.mod_token.span),
                 vis => self.source.start(vis.span()),
             };
-            self.decls.push(ModDecl { name, inline_path: self.inline_path.clone(), path_attr, path_literal, insert_at });
+            self.decls.push(ModDecl {
+                name,
+                inline_path: self.inline_path.clone(),
+                path_attr,
+                path_literal,
+                insert_at,
+            });
         } else {
             self.inline_path.push(name);
             visit::visit_item_mod(self, item);
@@ -528,10 +550,20 @@ pub fn dyn_candidate(item: &ItemTrait) -> Result<Vec<String>, String> {
     if item.auto_token.is_some() {
         return Err("auto trait".into());
     }
-    if item.generics.params.iter().any(|param| matches!(param, GenericParam::Type(param) if param.default.as_ref().is_some_and(mentions_self))) {
+    if item
+        .generics
+        .params
+        .iter()
+        .any(|param| matches!(param, GenericParam::Type(param) if param.default.as_ref().is_some_and(mentions_self)))
+    {
         return Err("a type parameter defaults to Self".into());
     }
-    if item.generics.where_clause.as_ref().is_some_and(|clause| clause.predicates.iter().any(|p| mentions_self(&p.to_token_stream()))) {
+    if item
+        .generics
+        .where_clause
+        .as_ref()
+        .is_some_and(|clause| clause.predicates.iter().any(|p| mentions_self(&p.to_token_stream())))
+    {
         return Err("its where clause constrains Self".into());
     }
     let mut local_supertraits = Vec::new();
@@ -777,7 +809,9 @@ mod tests {
     fn tracks_state_hooks_only_with_dioxus() {
         let text = "fn App() { let mut count = use_signal(|| 0);\nlet other = make(); }\n";
         let (out, report) = rewrite(text, true);
-        assert!(out.contains("{ let __scry_hook = use_signal(|| 0); ::scry::__private::dioxus::track(\"App\", \"count\""));
+        assert!(
+            out.contains("{ let __scry_hook = use_signal(|| 0); ::scry::__private::dioxus::track(\"App\", \"count\"")
+        );
         assert!(report.contains("hook App.count (use_signal)"));
         assert_eq!(report.matches("hook").count(), 1);
         assert_eq!(rewrite(text, false).0, text);
@@ -801,9 +835,21 @@ impl<T> Wrap<T> { fn unwrap(&self) {} }
 impl Default for S { fn default() -> Self { S } }
 ";
         let (out, report) = rewrite(text, false);
-        for callable in ["fn add", "fn only_windows", "method S::get", "method S::bump", "method S::new", "method S::eat", "method S::same", "method S::default"] {
-            assert!(report.contains(&format!("+ {callable}")), "{callable} missing:
-{report}");
+        for callable in [
+            "fn add",
+            "fn only_windows",
+            "method S::get",
+            "method S::bump",
+            "method S::new",
+            "method S::eat",
+            "method S::same",
+            "method S::default",
+        ] {
+            assert!(
+                report.contains(&format!("+ {callable}")),
+                "{callable} missing:
+{report}"
+            );
         }
         for (skipped, reason) in [
             ("fn generic", "it is generic"),
@@ -815,8 +861,11 @@ impl Default for S { fn default() -> Self { S } }
             ("fn wrapped", "#[tokio::main] attribute"),
             ("impl Wrap<T>", "the impl is generic"),
         ] {
-            assert!(report.lines().any(|line| line.contains(skipped) && line.contains(reason)), "{skipped}:
-{report}");
+            assert!(
+                report.lines().any(|line| line.contains(skipped) && line.contains(reason)),
+                "{skipped}:
+{report}"
+            );
         }
         assert!(!report.contains("fn main") && !report.contains("inner"), "{report}");
 

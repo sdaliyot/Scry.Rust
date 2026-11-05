@@ -24,9 +24,9 @@
 
 mod call;
 mod command;
-mod from_value;
 pub mod endpoint;
 mod error;
+mod from_value;
 mod impls;
 mod path;
 mod reflect;

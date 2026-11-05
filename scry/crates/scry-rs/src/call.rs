@@ -78,9 +78,12 @@ fn all() -> &'static [Function] {
 /// Every function, as `{path, signature}` objects; with a `filter`, those whose path contains it.
 pub(crate) fn list(filter: &str) -> Value {
     let filter = filter.to_lowercase();
-    let mut functions: Vec<&Function> = all().iter().filter(|function| function.path.to_lowercase().contains(&filter)).collect();
+    let mut functions: Vec<&Function> =
+        all().iter().filter(|function| function.path.to_lowercase().contains(&filter)).collect();
     functions.sort_by_key(|function| function.path);
-    Value::Array(functions.iter().map(|function| json!({ "path": function.path, "signature": function.signature })).collect())
+    Value::Array(
+        functions.iter().map(|function| json!({ "path": function.path, "signature": function.signature })).collect(),
+    )
 }
 
 /// The signatures of the methods callable on `value`.
@@ -129,8 +132,11 @@ pub(crate) fn free_names() -> Vec<(&'static str, usize)> {
 /// Every method name with its arity, for scripts to call with method syntax.
 #[cfg_attr(not(feature = "script"), allow(dead_code))]
 pub(crate) fn method_names() -> Vec<(&'static str, usize)> {
-    let mut names: Vec<(&str, usize)> =
-        all().iter().filter(|function| function.receiver != Receiver::None).map(|function| (function.name, function.arity)).collect();
+    let mut names: Vec<(&str, usize)> = all()
+        .iter()
+        .filter(|function| function.receiver != Receiver::None)
+        .map(|function| (function.name, function.arity))
+        .collect();
     names.sort_unstable();
     names.dedup();
     names
@@ -138,7 +144,11 @@ pub(crate) fn method_names() -> Vec<(&'static str, usize)> {
 
 fn invoke(function: &Function, this: This<'_>, args: &[Value], depth: usize) -> Result<Value, Error> {
     if args.len() != function.arity {
-        return Err(Error::ArgumentCount { function: function.path.to_owned(), expected: function.arity, found: args.len() });
+        return Err(Error::ArgumentCount {
+            function: function.path.to_owned(),
+            expected: function.arity,
+            found: args.len(),
+        });
     }
     catch_unwind(AssertUnwindSafe(|| (function.invoke)(this, args, depth))).unwrap_or_else(|panic| {
         let message = panic
@@ -182,9 +192,12 @@ impl Registry {
             found = Some((value.as_any().map(|value| value.type_id()), value.type_name()));
             Ok(())
         })?;
-        let Some((type_id, type_name)) = found else { return Err(Error::NoSuchMethod { type_name: "?", method: method.into() }) };
+        let Some((type_id, type_name)) = found else {
+            return Err(Error::NoSuchMethod { type_name: "?", method: method.into() });
+        };
         let no_method = || Error::NoSuchMethod { type_name, method: method.to_owned() };
-        let candidates: Vec<&Function> = methods(type_id.ok_or_else(no_method)?).filter(|function| function.name == method).collect();
+        let candidates: Vec<&Function> =
+            methods(type_id.ok_or_else(no_method)?).filter(|function| function.name == method).collect();
         let function = match candidates.as_slice() {
             [] => return Err(no_method()),
             [function] => *function,

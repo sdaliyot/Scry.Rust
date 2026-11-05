@@ -57,12 +57,7 @@ struct Stats {
 
 impl Describe for Stats {
     fn describe(&self) -> String {
-        format!(
-            "{} ticks, {} sold, revenue {}",
-            self.ticks,
-            self.sold,
-            util::format_cents(self.revenue_cents)
-        )
+        format!("{} ticks, {} sold, revenue {}", self.ticks, self.sold, util::format_cents(self.revenue_cents))
     }
 }
 
