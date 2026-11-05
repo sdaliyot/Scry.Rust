@@ -30,7 +30,10 @@ mod from_value;
 #[doc(hidden)]
 pub mod hooks;
 mod impls;
+mod locks;
 mod path;
+#[doc(hidden)]
+pub mod probes;
 mod reflect;
 mod registry;
 #[cfg(feature = "script")]

@@ -545,9 +545,13 @@ dependencies = [
  "futures-util",
  "getrandom 0.3.4",
  "linkme",
+ "lock_api",
+ "parking_lot",
  "rhai",
  "scry-rs-derive",
+ "serde",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]

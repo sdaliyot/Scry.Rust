@@ -1,8 +1,10 @@
 //! `Reflect` for std types.
 
 use std::any::type_name;
-use std::collections::{BTreeMap, HashMap};
+use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt::Display;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicIsize, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, OnceLock, RwLock, TryLockError, TryLockResult};
 use std::thread;
@@ -43,6 +45,10 @@ macro_rules! integer_impls {
             fn snapshot(&self, _depth: usize) -> Value { Value::from(*self) }
             leaf_access!();
 
+            fn build(value: &Value) -> Result<Self, Error> {
+                <Self as crate::from_value::FromValue>::from_value(value)
+            }
+
             fn assign(&mut self, value: &Value) -> Result<(), Error> {
                 let parsed = value
                     .as_i64()
@@ -66,6 +72,10 @@ macro_rules! wide_integer_impls {
             fn snapshot(&self, _depth: usize) -> Value { Value::String(self.to_string()) }
             leaf_access!();
 
+            fn build(value: &Value) -> Result<Self, Error> {
+                <Self as crate::from_value::FromValue>::from_value(value)
+            }
+
             fn assign(&mut self, value: &Value) -> Result<(), Error> {
                 let text = match value {
                     Value::String(text) => text.clone(),
@@ -88,6 +98,10 @@ macro_rules! float_impls {
             fn kind(&self) -> Kind { Kind::Scalar }
             fn snapshot(&self, _depth: usize) -> Value { Value::from(f64::from(*self)) }
             leaf_access!();
+
+            fn build(value: &Value) -> Result<Self, Error> {
+                <Self as crate::from_value::FromValue>::from_value(value)
+            }
 
             fn assign(&mut self, value: &Value) -> Result<(), Error> {
                 let number = value.as_f64().ok_or_else(|| Error::mismatch("a number", value))?;
@@ -115,6 +129,10 @@ impl Reflect for bool {
 
     leaf_access!();
 
+    fn build(value: &Value) -> Result<Self, Error> {
+        <Self as crate::from_value::FromValue>::from_value(value)
+    }
+
     fn assign(&mut self, value: &Value) -> Result<(), Error> {
         *self = value.as_bool().ok_or_else(|| Error::mismatch("true or false", value))?;
         Ok(())
@@ -135,6 +153,10 @@ impl Reflect for char {
     }
 
     leaf_access!();
+
+    fn build(value: &Value) -> Result<Self, Error> {
+        <Self as crate::from_value::FromValue>::from_value(value)
+    }
 
     fn assign(&mut self, value: &Value) -> Result<(), Error> {
         let mut chars =
@@ -163,6 +185,10 @@ impl Reflect for String {
     }
 
     leaf_access!();
+
+    fn build(value: &Value) -> Result<Self, Error> {
+        <Self as crate::from_value::FromValue>::from_value(value)
+    }
 
     fn assign(&mut self, value: &Value) -> Result<(), Error> {
         value.as_str().ok_or_else(|| Error::mismatch("a string", value))?.clone_into(self);
@@ -267,6 +293,10 @@ impl<T: Reflect> Reflect for Option<T> {
         self.as_ref().map_or(0, Reflect::member_count)
     }
 
+    fn build(value: &Value) -> Result<Self, Error> {
+        if value.is_null() { Ok(None) } else { T::build(value).map(Some) }
+    }
+
     fn as_any(&self) -> Option<&dyn std::any::Any> {
         self.as_ref().and_then(Reflect::as_any)
     }
@@ -306,10 +336,10 @@ impl<T: Reflect> Reflect for Option<T> {
                 Ok(())
             }
             Some(inner) => inner.assign(value),
-            None => Err(Error::not_writable(format!(
-                "{} is None, and a value cannot be created inside it from JSON",
-                type_name::<Self>()
-            ))),
+            None => {
+                *self = Some(T::build(value)?);
+                Ok(())
+            }
         }
     }
 }
@@ -446,6 +476,10 @@ impl<T: Reflect> Reflect for Vec<T> {
         <[_]>::len(self)
     }
 
+    fn build(value: &Value) -> Result<Self, Error> {
+        value.as_array().ok_or_else(|| Error::mismatch("an array", value))?.iter().map(T::build).collect()
+    }
+
     fn snapshot(&self, depth: usize) -> Value {
         sequence_snapshot(self, self.type_name(), depth)
     }
@@ -501,6 +535,106 @@ impl<T: Reflect> Reflect for &[T] {
         sequence_write_shared(self, self.type_name(), path, visit)
     }
 }
+
+/// A ring buffer, indexed like a `Vec`.
+impl<T: Reflect> Reflect for VecDeque<T> {
+    fn type_name(&self) -> &'static str {
+        type_name::<Self>()
+    }
+
+    fn kind(&self) -> Kind {
+        Kind::Sequence
+    }
+
+    fn members(&self) -> Vec<Member> {
+        (0..self.len().min(MAX_ELEMENTS)).map(|index| Member::new(format!("[{index}]"), type_name::<T>())).collect()
+    }
+
+    fn member_count(&self) -> usize {
+        self.len()
+    }
+
+    fn snapshot(&self, depth: usize) -> Value {
+        if depth == 0 {
+            return truncated(self.type_name());
+        }
+        let mut values: Vec<Value> = self.iter().take(MAX_ELEMENTS).map(|item| item.snapshot(depth - 1)).collect();
+        if self.len() > MAX_ELEMENTS {
+            values.push(Value::String(format!("… {} more", self.len() - MAX_ELEMENTS)));
+        }
+        Value::Array(values)
+    }
+
+    fn read(&self, path: &[Segment], visit: Visit<'_>) -> Result<(), Error> {
+        let Some((segment, rest)) = path.split_first() else { return visit(self) };
+        self[sequence_index(segment, self.len())?].read(rest, visit)
+    }
+
+    fn write(&mut self, path: &[Segment], visit: VisitMut<'_>) -> Result<(), Error> {
+        let Some((segment, rest)) = path.split_first() else { return visit(self) };
+        let index = sequence_index(segment, self.len())?;
+        self[index].write(rest, visit)
+    }
+
+    fn write_shared(&self, path: &[Segment], visit: VisitMut<'_>) -> Result<(), Error> {
+        let Some((segment, rest)) = path.split_first() else {
+            return Err(Error::needs_interior_mutability(self.type_name()));
+        };
+        self[sequence_index(segment, self.len())?].write_shared(rest, visit)
+    }
+}
+
+/// Sets are read as sequences, in iteration order. Their elements cannot be changed in place -
+/// that could break the set's invariants - so writes only continue through interior mutability.
+macro_rules! set_impl {
+    ($set:ident, $($bound:path),*) => {
+        impl<T: Reflect $(+ $bound)*> Reflect for $set<T> {
+            fn type_name(&self) -> &'static str {
+                type_name::<Self>()
+            }
+
+            fn kind(&self) -> Kind {
+                Kind::Sequence
+            }
+
+            fn members(&self) -> Vec<Member> {
+                (0..self.len().min(MAX_ELEMENTS)).map(|index| Member::new(format!("[{index}]"), type_name::<T>())).collect()
+            }
+
+            fn member_count(&self) -> usize {
+                self.len()
+            }
+
+            fn snapshot(&self, depth: usize) -> Value {
+                if depth == 0 {
+                    return truncated(self.type_name());
+                }
+                Value::Array(self.iter().take(MAX_ELEMENTS).map(|item| item.snapshot(depth - 1)).collect())
+            }
+
+            fn read(&self, path: &[Segment], visit: Visit<'_>) -> Result<(), Error> {
+                let Some((segment, rest)) = path.split_first() else { return visit(self) };
+                let index = sequence_index(segment, self.len())?;
+                self.iter().nth(index).expect("index checked").read(rest, visit)
+            }
+
+            fn write(&mut self, path: &[Segment], visit: VisitMut<'_>) -> Result<(), Error> {
+                self.write_shared(path, visit)
+            }
+
+            fn write_shared(&self, path: &[Segment], visit: VisitMut<'_>) -> Result<(), Error> {
+                let Some((segment, rest)) = path.split_first() else {
+                    return Err(Error::needs_interior_mutability(self.type_name()));
+                };
+                let index = sequence_index(segment, self.len())?;
+                self.iter().nth(index).expect("index checked").write_shared(rest, visit)
+            }
+        }
+    };
+}
+
+set_impl!(HashSet, Eq, std::hash::Hash);
+set_impl!(BTreeSet, Ord);
 
 impl<T: Reflect, const N: usize> Reflect for [T; N] {
     fn type_name(&self) -> &'static str {
@@ -742,6 +876,176 @@ impl<T: Reflect + ?Sized> Reflect for Arc<T> {
     }
 }
 
+/// Transparent, like `Arc`.
+impl<T: Reflect + ?Sized> Reflect for Rc<T> {
+    fn type_name(&self) -> &'static str {
+        (**self).type_name()
+    }
+
+    fn kind(&self) -> Kind {
+        (**self).kind()
+    }
+
+    fn members(&self) -> Vec<Member> {
+        (**self).members()
+    }
+
+    fn member_count(&self) -> usize {
+        (**self).member_count()
+    }
+
+    fn snapshot(&self, depth: usize) -> Value {
+        (**self).snapshot(depth)
+    }
+
+    fn read(&self, path: &[Segment], visit: Visit<'_>) -> Result<(), Error> {
+        (**self).read(path, visit)
+    }
+
+    fn write(&mut self, path: &[Segment], visit: VisitMut<'_>) -> Result<(), Error> {
+        (**self).write_shared(path, visit)
+    }
+
+    fn write_shared(&self, path: &[Segment], visit: VisitMut<'_>) -> Result<(), Error> {
+        (**self).write_shared(path, visit)
+    }
+
+    fn assign(&mut self, value: &Value) -> Result<(), Error> {
+        (**self).write_shared(&[], &mut |inner| inner.assign(value))
+    }
+}
+
+/// Borrowed for each access, like a lock: a value borrowed by the app right now reports
+/// `lock_busy` rather than panicking, and a write borrows it mutably.
+impl<T: Reflect + ?Sized> Reflect for RefCell<T> {
+    fn type_name(&self) -> &'static str {
+        type_name::<Self>()
+    }
+
+    fn kind(&self) -> Kind {
+        self.try_borrow().map_or(Kind::Opaque, |value| value.kind())
+    }
+
+    fn members(&self) -> Vec<Member> {
+        self.try_borrow().map(|value| value.members()).unwrap_or_default()
+    }
+
+    fn member_count(&self) -> usize {
+        self.try_borrow().map_or(0, |value| value.member_count())
+    }
+
+    fn snapshot(&self, depth: usize) -> Value {
+        match self.try_borrow() {
+            Ok(value) => value.snapshot(depth),
+            Err(_) => Value::String(format!("<borrowed: {}>", crate::reflect::short_type_name(self.type_name()))),
+        }
+    }
+
+    fn read(&self, path: &[Segment], visit: Visit<'_>) -> Result<(), Error> {
+        self.try_borrow().map_err(|_| Error::LockBusy { type_name: self.type_name() })?.read(path, visit)
+    }
+
+    fn write(&mut self, path: &[Segment], visit: VisitMut<'_>) -> Result<(), Error> {
+        self.get_mut().write(path, visit)
+    }
+
+    fn write_shared(&self, path: &[Segment], visit: VisitMut<'_>) -> Result<(), Error> {
+        self.try_borrow_mut().map_err(|_| Error::LockBusy { type_name: self.type_name() })?.write(path, visit)
+    }
+
+    fn assign(&mut self, value: &Value) -> Result<(), Error> {
+        self.get_mut().assign(value)
+    }
+}
+
+/// JSON as it is: what a serialized third-party value is navigated through.
+impl Reflect for Value {
+    fn type_name(&self) -> &'static str {
+        type_name::<Self>()
+    }
+
+    fn kind(&self) -> Kind {
+        match self {
+            Value::Array(_) => Kind::Sequence,
+            Value::Object(_) => Kind::Struct,
+            _ => Kind::Scalar,
+        }
+    }
+
+    fn members(&self) -> Vec<Member> {
+        match self {
+            Value::Array(items) => (0..items.len().min(MAX_ELEMENTS))
+                .map(|index| Member::new(format!("[{index}]"), type_name::<Value>()))
+                .collect(),
+            Value::Object(fields) => {
+                fields.keys().take(MAX_ELEMENTS).map(|key| Member::new(key.clone(), type_name::<Value>())).collect()
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    fn member_count(&self) -> usize {
+        match self {
+            Value::Array(items) => items.len(),
+            Value::Object(fields) => fields.len(),
+            _ => 0,
+        }
+    }
+
+    fn snapshot(&self, depth: usize) -> Value {
+        match self {
+            Value::Array(_) | Value::Object(_) if depth == 0 => truncated(self.type_name()),
+            Value::Array(items) => {
+                Value::Array(items.iter().take(MAX_ELEMENTS).map(|item| item.snapshot(depth - 1)).collect())
+            }
+            Value::Object(fields) => Value::Object(
+                fields.iter().take(MAX_ELEMENTS).map(|(key, value)| (key.clone(), value.snapshot(depth - 1))).collect(),
+            ),
+            scalar => scalar.clone(),
+        }
+    }
+
+    fn read(&self, path: &[Segment], visit: Visit<'_>) -> Result<(), Error> {
+        let Some((segment, rest)) = path.split_first() else { return visit(self) };
+        json_child(self, segment)?.read(rest, visit)
+    }
+
+    fn write(&mut self, path: &[Segment], visit: VisitMut<'_>) -> Result<(), Error> {
+        let Some((segment, rest)) = path.split_first() else { return visit(self) };
+        let type_name = self.type_name();
+        let child = match self {
+            Value::Array(items) => {
+                let len = items.len();
+                let index = segment.index().ok_or_else(|| Error::BadPath(format!("'{segment}' is not an index")))?;
+                items.get_mut(index).ok_or(Error::IndexOutOfRange { len, index })?
+            }
+            Value::Object(fields) => {
+                fields.get_mut(&*segment.name()).ok_or_else(|| crate::__private::no_member(type_name, segment))?
+            }
+            _ => return Err(Error::NotNavigable { type_name }),
+        };
+        child.write(rest, visit)
+    }
+
+    fn assign(&mut self, value: &Value) -> Result<(), Error> {
+        *self = value.clone();
+        Ok(())
+    }
+}
+
+fn json_child<'a>(value: &'a Value, segment: &Segment) -> Result<&'a Value, Error> {
+    match value {
+        Value::Array(items) => {
+            let index = segment.index().ok_or_else(|| Error::BadPath(format!("'{segment}' is not an index")))?;
+            items.get(index).ok_or(Error::IndexOutOfRange { len: items.len(), index })
+        }
+        Value::Object(fields) => {
+            fields.get(&*segment.name()).ok_or_else(|| crate::__private::no_member(value.type_name(), segment))
+        }
+        _ => Err(Error::NotNavigable { type_name: value.type_name() }),
+    }
+}
+
 /// Transparent, shared like an `Arc`: a write continues below only through interior mutability.
 impl<T: Reflect + ?Sized> Reflect for &T {
     fn type_name(&self) -> &'static str {
@@ -914,8 +1218,24 @@ pub(crate) fn without_waiting<R>(f: impl FnOnce() -> R) -> R {
     result
 }
 
+/// Tries a lock that cannot be poisoned (see `locks`) until it is free, for at most
+/// [`LOCK_TIMEOUT`], and not at all while a hook captures.
+#[cfg_attr(not(any(feature = "lock_api", feature = "tokio")), allow(dead_code))]
+pub(crate) fn wait_for<G>(type_name: &'static str, mut attempt: impl FnMut() -> Option<G>) -> Result<G, Error> {
+    let deadline = Instant::now() + LOCK_TIMEOUT;
+    loop {
+        if let Some(guard) = attempt() {
+            return Ok(guard);
+        }
+        if NO_WAIT.get() || Instant::now() >= deadline {
+            return Err(Error::LockBusy { type_name });
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+}
+
 /// Locks for the registry, waiting at most [`LOCK_TIMEOUT`] for the app to let go.
-fn acquire<'a, G>(
+pub(crate) fn acquire<'a, G>(
     type_name: &'static str,
     mut attempt: impl FnMut() -> TryLockResult<G>,
     clear_poison: &'a dyn Fn(),
@@ -941,7 +1261,7 @@ fn acquire<'a, G>(
 /// `Debug` impl, a called method - releasing the guard poisons the lock, and every later
 /// `.lock().unwrap()` in the app would panic too. So it clears the poison it caused; the panic
 /// itself is caught by `execute`.
-struct Held<'a, G> {
+pub(crate) struct Held<'a, G> {
     guard: Option<G>,
     /// `None` when the lock was poisoned before the registry took it.
     clear_poison: Option<&'a dyn Fn()>,

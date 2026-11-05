@@ -1,20 +1,13 @@
 //! Building argument values from JSON, for calls into the app.
 //!
-//! [`FromValue`] is implemented here for std types and by `#[derive(Reflect)]` for app types that
-//! are not generic. The generated call shims reach it through autoref probes like the derive's
-//! field probes, so a parameter type without it still compiles and only fails when called:
-//!
-//! - [`ArgProbe`], for a parameter taken by value: `T: FromValue`, else a `cannot_convert` error.
-//! - [`RefProbe`], for a parameter taken by `&T`: a `T` built from JSON when `T: FromValue`, else
-//!   its owned form for unsized types (`String` for `&str`, `Vec<U>` for `&[U]`, `PathBuf` for
-//!   `&Path`), else the error. The shim lends the result to the call through `Borrow<T>`.
+//! [`FromValue`] is implemented here for std types and by `#[derive(Reflect)]` for app types.
+//! Generated code reaches it through the `probe_arg!` and `probe_ref_arg!` probes (see
+//! [`crate::probes`]), which fall back to `Deserialize` and `FromStr` for types without it, so a
+//! parameter type that supports none of them still compiles and only fails when called.
 
 use std::any::type_name;
-use std::borrow::Borrow;
 use std::collections::{BTreeMap, HashMap};
-use std::convert::Infallible;
 use std::hash::Hash;
-use std::marker::PhantomData;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -160,36 +153,6 @@ tuple_from_value! {
     4: A 0, B 1, C 2, D 3;
 }
 
-/// Picks how a by-value parameter of type `T` is built; see the module docs.
-pub struct ArgProbe<T>(PhantomData<fn() -> T>);
-
-impl<T> ArgProbe<T> {
-    #[allow(clippy::new_without_default)]
-    pub fn new() -> Self {
-        Self(PhantomData)
-    }
-}
-
-pub trait ViaFromValue<T> {
-    fn scry_arg(&self, value: &Value) -> Result<T, Error>;
-}
-
-impl<T: FromValue> ViaFromValue<T> for &&ArgProbe<T> {
-    fn scry_arg(&self, value: &Value) -> Result<T, Error> {
-        T::from_value(value)
-    }
-}
-
-pub trait ViaNoValue<T> {
-    fn scry_arg(&self, value: &Value) -> Result<T, Error>;
-}
-
-impl<T> ViaNoValue<T> for &ArgProbe<T> {
-    fn scry_arg(&self, _value: &Value) -> Result<T, Error> {
-        Err(Error::CannotConvert { type_name: type_name::<T>() })
-    }
-}
-
 /// Picks how a method taking `self` by value gets its receiver: a clone of the live value when
 /// `T: Clone`, so the app's own value is left alone; otherwise the call is refused.
 pub struct SelfProbe<'a, T>(pub &'a T);
@@ -211,63 +174,5 @@ pub trait ViaNoClone<T> {
 impl<T> ViaNoClone<T> for &SelfProbe<'_, T> {
     fn scry_self(&self) -> Result<T, Error> {
         Err(Error::NotCallable(format!("the method takes self by value, and {} is not Clone", type_name::<T>())))
-    }
-}
-
-/// Picks how a `&T` parameter is built; see the module docs.
-pub struct RefProbe<T: ?Sized>(PhantomData<fn() -> Box<T>>);
-
-impl<T: ?Sized> RefProbe<T> {
-    #[allow(clippy::new_without_default)]
-    pub fn new() -> Self {
-        Self(PhantomData)
-    }
-}
-
-pub trait ViaRefValue {
-    type Held;
-    fn scry_ref_arg(&self, value: &Value) -> Result<Self::Held, Error>;
-}
-
-impl<T: FromValue> ViaRefValue for &&RefProbe<T> {
-    type Held = T;
-    fn scry_ref_arg(&self, value: &Value) -> Result<T, Error> {
-        T::from_value(value)
-    }
-}
-
-pub trait ViaRefOwned {
-    type Held;
-    fn scry_ref_arg(&self, value: &Value) -> Result<Self::Held, Error>;
-}
-
-impl<T: ?Sized + ToOwned> ViaRefOwned for &RefProbe<T>
-where
-    T::Owned: FromValue,
-{
-    type Held = T::Owned;
-    fn scry_ref_arg(&self, value: &Value) -> Result<T::Owned, Error> {
-        T::Owned::from_value(value)
-    }
-}
-
-pub trait ViaRefNone {
-    type Held;
-    fn scry_ref_arg(&self, value: &Value) -> Result<Self::Held, Error>;
-}
-
-impl<T: ?Sized> ViaRefNone for RefProbe<T> {
-    type Held = Unconstructible<T>;
-    fn scry_ref_arg(&self, _value: &Value) -> Result<Unconstructible<T>, Error> {
-        Err(Error::CannotConvert { type_name: type_name::<&T>() })
-    }
-}
-
-/// What [`ViaRefNone`] would lend, if it ever produced a value; it never does.
-pub struct Unconstructible<T: ?Sized>(Infallible, PhantomData<fn() -> Box<T>>);
-
-impl<T: ?Sized> Borrow<T> for Unconstructible<T> {
-    fn borrow(&self) -> &T {
-        match self.0 {}
     }
 }

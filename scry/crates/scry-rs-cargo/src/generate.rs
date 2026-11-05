@@ -673,12 +673,10 @@ const TRAIT_METHODS: &str = " #[doc(hidden)] #[allow(dead_code)] \
 
 const IMPL_METHODS: &str = " #[allow(clippy::all, clippy::pedantic, clippy::nursery, clippy::restriction)] \
     fn __scry_ref(&self) -> ::scry::__private::FieldRef<'_> { \
-    #[allow(unused_imports)] use ::scry::__private::{ViaDebug as _, ViaOpaque as _, ViaReflect as _}; \
-    (&&&::scry::__private::Probe(self)).scry_ref() } \
+    ::scry::__private::probe_ref!(self) } \
     #[allow(clippy::all, clippy::pedantic, clippy::nursery, clippy::restriction)] \
     fn __scry_mut(&mut self) -> ::scry::__private::FieldMut<'_> { \
-    #[allow(unused_imports)] use ::scry::__private::{ViaOtherMut as _, ViaReflectMut as _}; \
-    (&&&::scry::__private::ProbeMut::new(self)).scry_mut() } ";
+    ::scry::__private::probe_mut!(self) } ";
 
 fn static_registration(name: &str, path: &str) -> String {
     format!(
@@ -686,9 +684,8 @@ fn static_registration(name: &str, path: &str) -> String {
          #[linkme(crate = ::scry::__private::linkme)] #[doc(hidden)] #[allow(non_upper_case_globals, clippy::all, clippy::pedantic, clippy::nursery, clippy::restriction)] \
          static __SCRY_STATIC_{name}: ::scry::__private::StaticEntry = {{ \
          fn __scry_register(registry: &mut ::scry::Registry) {{ \
-         #[allow(unused_imports)] use ::scry::__private::{{ViaDebug as _, ViaOpaque as _, ViaReflect as _}}; \
          registry.__add_field(::core::concat!(::core::module_path!(), \"::\", {path:?}), \
-         (&&&::scry::__private::Probe(&{name})).scry_ref()); }} __scry_register }};"
+         ::scry::__private::probe_ref!(&{name})); }} __scry_register }};"
     )
 }
 
@@ -1211,12 +1208,12 @@ impl Default for S { fn default() -> Self { S } }
         let shim = |name: &str| out.lines().find(|line| line.contains(&format!("fn {name}"))).unwrap().to_owned();
         assert!(shim("only_windows").contains("} # [cfg (windows)] # [:: scry"), "{}", shim("only_windows"));
         let add = shim("add");
-        assert!(add.contains("ArgProbe :: < i64 >") && add.contains("RefProbe :: < str >"), "{add}");
+        assert!(add.contains("probe_arg ! (i64") && add.contains("probe_ref_arg ! (str"), "{add}");
         assert!(add.contains("signature : \"fn add(a: i64, b: &str) -> i64\""), "{add}");
         let methods = shim("get");
         assert!(shim("default").contains("< S as Default > :: default"), "{}", shim("default"));
-        assert!(methods.contains("RefProbe :: < S >"), "Self is spelled as the impl type: {methods}");
-        assert!(methods.contains("RefProbe :: < str >"), "a named lifetime is dropped: {methods}");
+        assert!(methods.contains("probe_ref_arg ! (S ,"), "Self is spelled as the impl type: {methods}");
+        assert!(methods.contains("probe_ref_arg ! (str"), "a named lifetime is dropped: {methods}");
         assert!(methods.contains("SelfProbe (this)"), "{methods}");
         assert!(methods.contains("Receiver :: Mut"), "{methods}");
     }
@@ -1260,11 +1257,11 @@ let _9: Cache<u8, u8>;
         }
         let show = out.lines().find(|line| line.starts_with("pub fn show")).unwrap();
         assert!(show.contains("show :: < crate :: Item >"), "{show}");
-        assert!(show.contains("RefProbe :: < crate :: Item >"), "T is replaced in parameters: {show}");
+        assert!(show.contains("probe_ref_arg ! (crate :: Item"), "T is replaced in parameters: {show}");
         assert!(show.contains("show :: < Vec < String > >"), "{show}");
         let cache = out.lines().find(|line| line.starts_with("impl<K: Clone, V>")).unwrap();
         assert!(cache.contains("TypeId :: of :: < Cache < u32 , crate :: Item > >"), "{cache}");
-        assert!(cache.contains("RefProbe :: < u32 >"), "K is replaced: {cache}");
+        assert!(cache.contains("probe_ref_arg ! (u32"), "K is replaced: {cache}");
     }
 
     #[test]
@@ -1315,7 +1312,7 @@ fn main() {}
         assert!(!method.contains(r#"arg ("a""#), "a destructured parameter is not captured: {method}");
         assert!(method.contains(r#"__scry_changes . arg ("out")"#), "a &mut parameter can be changed: {method}");
         assert!(!method.contains(r#"__scry_changes . arg ("seen")"#), "a &T parameter cannot: {method}");
-        assert!(method.contains("ProbeMut :: new (& mut * self)"), "a &mut self receiver can be changed: {method}");
+        assert!(method.contains("probe_mut ! (& mut * self)"), "a &mut self receiver can be changed: {method}");
         assert!(method.contains("let mut out = out ;"), "a &mut parameter is rebound too: {method}");
         assert!(lines[8].contains(r#""::<S as Clone>::clone""#), "{}", lines[8]);
     }

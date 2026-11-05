@@ -1,9 +1,9 @@
 //! `#[derive(Reflect)]` for Scry.Rust.
 //!
 //! The generated impl sits next to the type, in the same module, which is what lets it read and
-//! write private fields. Each field goes through the autoref probes in `scry::__private`, so a
-//! field whose type does not implement `Reflect` degrades to its `Debug` output or its type name
-//! instead of breaking the build.
+//! write private fields. Each field goes through the probes in `scry::probes`, so a field whose
+//! type does not implement `Reflect` is seen through what it does implement - `Deref`, iteration,
+//! `serde`, `Debug` - or by its type name, instead of breaking the build.
 
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as Tokens;
@@ -22,6 +22,7 @@ fn expand(mut input: DeriveInput) -> syn::Result<Tokens> {
     // parameters never is; one with only type parameters is when they are, so its impl requires
     // that. Everything reachable from a static or a signal is `'static` anyway.
     let static_only = input.generics.lifetimes().next().is_none();
+    let plain = input.generics.params.is_empty();
     let mut from_generics = input.generics.clone();
     for parameter in from_generics.type_params_mut() {
         parameter.bounds.push(parse_quote!(::scry::__private::FromValue));
@@ -58,13 +59,22 @@ fn expand(mut input: DeriveInput) -> syn::Result<Tokens> {
                 #[allow(unused_variables, unused_imports, unreachable_patterns, clippy::all, clippy::pedantic, clippy::nursery, clippy::restriction)]
                 impl #from_impl ::scry::__private::FromValue for #name #from_type #from_where {
                     fn from_value(value: &::scry::Value) -> ::core::result::Result<Self, ::scry::Error> {
-                        use ::scry::__private::{ViaFromValue as _, ViaNoValue as _};
                         #construct
                     }
                 }
             }
         });
+        // `build` needs `FromValue`, which a generic type only has for some arguments.
+        let build = (plain && from_value.is_some()).then(|| {
+            quote! {
+                fn build(value: &::scry::Value) -> ::core::result::Result<Self, ::scry::Error> {
+                    <Self as ::scry::__private::FromValue>::from_value(value)
+                }
+            }
+        });
         let as_any = quote! {
+            #build
+
             fn as_any(&self) -> ::core::option::Option<&dyn ::core::any::Any> {
                 ::core::option::Option::Some(self)
             }
@@ -104,7 +114,7 @@ fn unsized_tail(fields: &Fields) -> bool {
 }
 
 fn arg_probe(ty: &Type, value: Tokens) -> Tokens {
-    quote!((&&&::scry::__private::ArgProbe::<#ty>::new()).scry_arg(#value)?)
+    quote!(::scry::__private::probe_arg!(#ty, #value)?)
 }
 
 /// Builds `constructor` (`Self`, `Self::Variant`) with `fields` from the JSON `value`: an object
@@ -213,19 +223,19 @@ fn fields_of(fields: &Fields) -> Vec<Field<'_>> {
         .collect()
 }
 
-/// Imports for the probes, so `scry_ref`/`scry_mut` resolve through autoref specialization.
+/// Nothing to import: the probe macros bring their own traits. Kept as the one place to add
+/// imports the generated methods need.
 fn probe_imports() -> Tokens {
-    quote! {
-        use ::scry::__private::{ViaDebug as _, ViaOpaque as _, ViaOtherMut as _, ViaReflect as _, ViaReflectMut as _};
-    }
+    Tokens::new()
 }
 
+/// A field as `scry` reads it; see `scry::probes` for how its type decides that.
 fn read_probe(access: Tokens) -> Tokens {
-    quote!((&&&::scry::__private::Probe(#access)).scry_ref())
+    quote!(::scry::__private::probe_ref!(#access))
 }
 
 fn write_probe(access: Tokens) -> Tokens {
-    quote!((&&&::scry::__private::ProbeMut::new(#access)).scry_mut())
+    quote!(::scry::__private::probe_mut!(#access))
 }
 
 fn expand_struct(fields: &Fields) -> Tokens {

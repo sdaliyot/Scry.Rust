@@ -250,6 +250,39 @@ exclude = ["crate::util::next_random", "crate::auth::*"]
 If a crate doesn't compile with its hook points, `cargo scry` builds it again without them and warns.
 `SCRY_VERBOSE=1` shows why. See [docs/design/hooks.md](docs/design/hooks.md) for the design.
 
+## Third-party types
+
+`cargo scry` only rewrites your own crates, so a dependency's types get no generated code. Instead,
+Scry uses the traits those types already implement. The choice is made at compile time for each
+field, argument or result. Nothing here names a crate, so any type with these traits is covered:
+
+| The type implements | Reading | Writing (`set`, hook changes) and building (`call` arguments) |
+|---|---|---|
+| `Deref` to a reflectable type | seen through | through `DerefMut` |
+| a lock or `RefCell` around a serde value | as JSON, under the lock | round-tripped through JSON, under the lock |
+| iteration by reference (`&C: IntoIterator`) | as a list, or a map for key-value pairs, with each item still navigable and callable | through each item's own locks |
+| `serde::Serialize` / `Deserialize` | as JSON (`chrono`, `uuid`, `url`, `rust_decimal`, ...) | round-tripped through JSON, including nested paths (`set at.date.year 2027`) |
+| `FromStr` | its `Debug` text | from a JSON string |
+| only `Debug`, or nothing | its `Debug` text, or its type name | refused |
+
+Example, from the console demo, with no Scry code for `parking_lot`, `uuid` or `chrono`:
+
+```powershell
+scry get APP.session                                  # {"id": "7516…", "opened": "2026-11-05T14:30:16Z", "cashier": null}
+scry set APP.session.opened 2026-01-01T09:30:00Z      # through the parking_lot lock and chrono's serde impls
+scry set APP.session.id not-a-uuid                    # type_mismatch: UUID parsing failed: invalid character…
+```
+
+**Locks** can't be handled generically: their contents are only safe to read through their own
+locking API, and no standard trait describes that. So they're covered per abstraction rather than per
+crate:
+- `lock_api` (`parking_lot`, `spin` and every other crate built on it) is supported by default.
+- `tokio::sync` is supported when the app depends on tokio; `cargo scry` turns that on by itself.
+- std's `Mutex`, `RwLock` and `RefCell` are always supported.
+
+A dependency's serde support is often an optional feature (`chrono/serde`). Without it, that type
+falls back to its `Debug` text.
+
 ## What gets generated
 
 `cargo scry` compiles a rewritten copy of each opted-in crate. The copy and a `scry-report.txt` listing
@@ -285,7 +318,9 @@ Type names are shown short (`Vec<Item>`); `ls` also gives the full one as `fullT
 ## Known limits
 
 - Plain stack locals can't be reached. Only statics, and state reachable from them or from tracked hooks.
-- Types from other crates show as `Debug` text or a type name, except the std types and Dioxus signals `scry-rs` supports.
+- Types from other crates are reached through the traits they implement (see "Third-party types").
+  A type with none of them shows as its `Debug` text or type name, and can't be written. Other
+  crates' methods can't be called.
 - Types created by third-party macros (Dioxus props, `bitflags!`) aren't rewritten.
 - A generic function or type can only be called with type arguments the crate itself uses with
   it. Instantiations that only appear inside other generic code, or that need a closure type, are

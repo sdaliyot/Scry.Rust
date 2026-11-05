@@ -6,6 +6,8 @@
 use std::sync::{Arc, Mutex};
 
 use scry::__private::{Function, Receiver, This};
+#[allow(unused_imports)] // which one resolves depends on the type
+use scry::__private::{ViaClone as _, ViaNoClone as _};
 use scry::{Reflect, Registry, Value, execute};
 use serde_json::json;
 
@@ -86,26 +88,20 @@ macro_rules! shim {
     };
 }
 
-#[allow(unused_imports)] // a shim imports every probe; which one resolves depends on the types
-use scry::__private::{
-    ViaClone as _, ViaDebug as _, ViaFromValue as _, ViaNoClone as _, ViaNoValue as _, ViaOpaque as _, ViaRefNone as _,
-    ViaRefOwned as _, ViaRefValue as _, ViaReflect as _,
-};
-
 fn result(value: &impl Reflect, depth: usize) -> Result<Value, scry::Error> {
     Ok(value.snapshot(depth))
 }
 
 shim!(LABEL, "label", "calls::Sprite::label", Ref, Sprite, 2, |this: This<'_>, args: &[Value], depth| {
     let this = this.downcast_ref::<Sprite>()?;
-    let arg0 = (&&&scry::__private::RefProbe::<str>::new()).scry_ref_arg(&args[0])?;
-    let arg1: u32 = (&&&scry::__private::ArgProbe::<u32>::new()).scry_arg(&args[1])?;
+    let arg0 = scry::__private::probe_ref_arg!(str, &args[0])?;
+    let arg1: u32 = scry::__private::probe_arg!(u32, &args[1])?;
     result(&Sprite::label(this, std::borrow::Borrow::<str>::borrow(&arg0), arg1), depth)
 });
 
 shim!(RENAME, "rename", "calls::Sprite::rename", Mut, Sprite, 1, |this: This<'_>, args: &[Value], depth| {
     let this = this.downcast_mut::<Sprite>()?;
-    let arg0: String = (&&&scry::__private::ArgProbe::<String>::new()).scry_arg(&args[0])?;
+    let arg0: String = scry::__private::probe_arg!(String, &args[0])?;
     result(&Sprite::rename(this, arg0), depth)
 });
 
@@ -116,23 +112,23 @@ shim!(AREA, "area_hint", "calls::Shape::area_hint", Ref, Shape, 0, |this: This<'
 });
 
 shim!(BUILD, "build", "calls::build", None, (), 1, |_this: This<'_>, args: &[Value], depth| {
-    let arg0: Sprite = (&&&scry::__private::ArgProbe::<Sprite>::new()).scry_arg(&args[0])?;
+    let arg0: Sprite = scry::__private::probe_arg!(Sprite, &args[0])?;
     let result = build(arg0);
-    Ok((&&&scry::__private::Probe(&result)).scry_ref().snapshot(depth))
+    Ok(scry::__private::probe_ref!(&result).snapshot(depth))
 });
 
 shim!(EXPLODE, "explode", "calls::explode", None, (), 1, |_this: This<'_>, args: &[Value], depth| {
-    let arg0 = (&&&scry::__private::RefProbe::<str>::new()).scry_ref_arg(&args[0])?;
+    let arg0 = scry::__private::probe_ref_arg!(str, &args[0])?;
     result(&explode(std::borrow::Borrow::<str>::borrow(&arg0)), depth)
 });
 
 shim!(TOTAL, "total", "calls::total", None, (), 1, |_this: This<'_>, args: &[Value], depth| {
-    let arg0 = (&&&scry::__private::RefProbe::<[i64]>::new()).scry_ref_arg(&args[0])?;
+    let arg0 = scry::__private::probe_ref_arg!([i64], &args[0])?;
     result(&total(std::borrow::Borrow::<[i64]>::borrow(&arg0)), depth)
 });
 
 shim!(OPAQUE, "opaque", "calls::opaque", None, (), 1, |_this: This<'_>, args: &[Value], depth| {
-    let arg0: std::time::Instant = (&&&scry::__private::ArgProbe::<std::time::Instant>::new()).scry_arg(&args[0])?;
+    let arg0: std::time::Instant = scry::__private::probe_arg!(std::time::Instant, &args[0])?;
     result(&format!("{arg0:?}"), depth)
 });
 

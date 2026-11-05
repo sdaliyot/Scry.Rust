@@ -174,15 +174,13 @@ pub fn shim(source: &Source, attrs: &[Attribute], sig: &Signature, callee: &Call
                             return Err("it takes a `&mut` argument".into());
                         }
                         let elem = &reference.elem;
-                        lets.push(quote! {
-                            let #binding = (&&&::scry::__private::RefProbe::<#elem>::new()).scry_ref_arg(&args[#index])?;
-                        });
+                        let build = build_from_json(quote!(probe_ref_arg), elem, quote!(&args[#index]));
+                        lets.push(quote!(let #binding = #build?;));
                         args.push(quote!(::core::borrow::Borrow::<#elem>::borrow(&#binding)));
                     }
                     ty => {
-                        lets.push(quote! {
-                            let #binding: #ty = (&&&::scry::__private::ArgProbe::<#ty>::new()).scry_arg(&args[#index])?;
-                        });
+                        let build = build_from_json(quote!(probe_arg), &ty, quote!(&args[#index]));
+                        lets.push(quote!(let #binding: #ty = #build?;));
                         args.push(quote!(#binding));
                     }
                 }
@@ -240,14 +238,11 @@ pub fn shim(source: &Source, attrs: &[Attribute], sig: &Signature, callee: &Call
                 args: &[::scry::Value],
                 depth: usize,
             ) -> ::core::result::Result<::scry::Value, ::scry::Error> {
-                use ::scry::__private::{
-                    ViaClone as _, ViaDebug as _, ViaFromValue as _, ViaNoClone as _, ViaNoValue as _, ViaOpaque as _,
-                    ViaReflect as _, ViaRefNone as _, ViaRefOwned as _, ViaRefValue as _,
-                };
+                use ::scry::__private::{ViaClone as _, ViaNoClone as _};
                 #this
                 #(#lets)*
                 let result = #callee_tokens(#(#args),*);
-                ::core::result::Result::Ok((&&&::scry::__private::Probe(&result)).scry_ref().snapshot(depth))
+                ::core::result::Result::Ok(::scry::__private::probe_ref!(&result).snapshot(depth))
             }
             ::scry::__private::Function {
                 name: #name,
@@ -262,6 +257,35 @@ pub fn shim(source: &Source, attrs: &[Attribute], sig: &Signature, callee: &Call
         };
     };
     Ok(format!(" {shim}"))
+}
+
+/// The expression that builds a `ty` from the JSON `value` through `probe` (`probe_arg`,
+/// `probe_ref_arg`), or fails. A type that borrows - `&str`, `Option<&T>`, `Cow<'_, str>` - is
+/// never built: JSON has nothing to lend it, and a lifetime the shim leaves to inference can make
+/// the probes pick a `Deserialize` impl that only holds for one lifetime, which fails to compile.
+pub fn build_from_json(probe: TokenStream, ty: &Type, value: TokenStream) -> TokenStream {
+    if borrows(ty) {
+        let name = compact(ty);
+        quote!(::core::result::Result::<_, ::scry::Error>::Err(::scry::Error::CannotConvert { type_name: #name }))
+    } else {
+        quote!(::scry::__private::#probe!(#ty, #value))
+    }
+}
+
+/// Whether a type holds a reference or a lifetime other than `'static`.
+fn borrows(ty: &Type) -> bool {
+    struct Borrows(bool);
+    impl<'ast> Visit<'ast> for Borrows {
+        fn visit_type_reference(&mut self, _: &'ast syn::TypeReference) {
+            self.0 = true;
+        }
+        fn visit_lifetime(&mut self, lifetime: &'ast Lifetime) {
+            self.0 |= lifetime.ident != "static";
+        }
+    }
+    let mut borrows = Borrows(false);
+    borrows.visit_type(ty);
+    borrows.0
 }
 
 /// Whether an `impl` block's methods can get shims: for a type the shim can name as `'static`

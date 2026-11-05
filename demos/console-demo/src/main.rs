@@ -29,7 +29,15 @@ pub struct AppState {
     stats: Mutex<Stats>,
     rules: Mutex<Vec<Box<dyn PriceRule + Send>>>,
     labels: Mutex<Cache<u32, String>>,
+    session: parking_lot::RwLock<Session>,
     started: Instant,
+}
+
+/// Who is running the shop, and since when.
+struct Session {
+    id: uuid::Uuid,
+    opened: chrono::DateTime<chrono::Utc>,
+    cashier: Option<String>,
 }
 
 impl AppState {
@@ -42,6 +50,11 @@ impl AppState {
                 Box::new(CategoryMarkup::new(Category::Tools, 25)),
             ]),
             labels: Mutex::new(Cache::new(8)),
+            session: parking_lot::RwLock::new(Session {
+                id: uuid::Uuid::new_v4(),
+                opened: chrono::Utc::now(),
+                cashier: None,
+            }),
             started: Instant::now(),
         }
     }
@@ -64,6 +77,10 @@ impl Describe for Stats {
 fn main() {
     let state = APP.get_or_init(|| Arc::new(AppState::new()));
     println!("console-demo running, pid {}. Ctrl+C to stop.", std::process::id());
+    {
+        let session = state.session.read();
+        println!("session {} opened {}", session.id, session.opened.format("%Y-%m-%d %H:%M:%S UTC"));
+    }
 
     let worker_state = Arc::clone(state);
     thread::spawn(move || worker_loop(&worker_state));
@@ -134,12 +151,13 @@ fn report(state: &AppState) {
     };
 
     println!(
-        "[{:>4}s] {} | stock value {} | avg fill {:.0}% | rules: {} | last: {}",
+        "[{:>4}s] {} | stock value {} | avg fill {:.0}% | rules: {} | last: {} | cashier: {}",
         state.started.elapsed().as_secs(),
         describe(&*stats),
         util::format_cents(inventory.total_value_cents()),
         average_fill * 100.0,
         rules,
         stats.last_sale.as_deref().unwrap_or("-"),
+        state.session.read().cashier.as_deref().unwrap_or("nobody"),
     );
 }

@@ -123,6 +123,17 @@ pub trait Reflect {
         None
     }
 
+    /// A new value built from JSON, for when there is none to assign into yet - an `Option` that is
+    /// `None`. Given for std scalars and strings, and by `#[derive(Reflect)]` for types without
+    /// generic parameters.
+    fn build(value: &Value) -> Result<Self, crate::Error>
+    where
+        Self: Sized,
+    {
+        let _ = value;
+        Err(crate::Error::CannotConvert { type_name: std::any::type_name::<Self>() })
+    }
+
     /// Replaces this value from JSON. Structs take an object of the fields to change; scalars and
     /// unit enum variants take a JSON scalar.
     fn assign(&mut self, value: &Value) -> Result<(), Error> {

@@ -15,3 +15,8 @@ exclude = ["crate::util::next_random"]
 
 [dependencies]
 scry = { package = "scry-rs", path = "../../scry/crates/scry-rs", optional = true }
+# Third-party types, as most apps hold them: a parking_lot lock around ids and timestamps with
+# serde support. Scry has no code for any of these crates.
+parking_lot = "0.12"
+uuid = { version = "1", features = ["serde", "v4"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }

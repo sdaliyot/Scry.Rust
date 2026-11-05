@@ -355,3 +355,21 @@ mod conditions {
         assert_eq!(execute(&registry, "assert")["error"]["code"], json!("bad_command"));
     }
 }
+
+#[derive(Reflect)]
+struct Profile {
+    nickname: Option<String>,
+    home: Option<Item>,
+}
+
+#[test]
+fn assigning_into_none_builds_the_value() {
+    let profile = Arc::new(Mutex::new(Profile { nickname: None, home: None }));
+    let mut registry = Registry::new();
+    registry.add("profile", Arc::clone(&profile));
+    assert_eq!(execute(&registry, "set profile.nickname Dana")["result"], json!("Dana"));
+    let item = r#"{"name": "cup", "qty": 2, "tags": [], "mode": "Idle"}"#;
+    assert_eq!(execute(&registry, &format!("set profile.home {item}"))["result"]["qty"], json!(2));
+    assert_eq!(profile.lock().unwrap().home.as_ref().unwrap().name, "cup");
+    assert_eq!(execute(&registry, "set profile.nickname null")["result"], json!(null));
+}

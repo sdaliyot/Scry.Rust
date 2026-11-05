@@ -105,6 +105,11 @@ fn subcommand(args: Vec<OsString>) -> ExitCode {
     } else {
         cmd.arg(command).arg("--features").arg("scry").args(rest);
     }
+    // Support for third-party locks that scry-rs only builds when asked: turned on when the app
+    // itself depends on the crate, so it costs nothing otherwise.
+    for feature in lock_features(&cargo) {
+        cmd.arg("--features").arg(format!("scry/{feature}"));
+    }
     cmd.env("RUSTC_WORKSPACE_WRAPPER", &exe).env(wrapper::GENERATOR_ID, generator_id());
     if env::var_os("CARGO_TARGET_DIR").is_none()
         && !rest.iter().any(|arg| arg.to_string_lossy().starts_with("--target-dir"))
@@ -120,6 +125,17 @@ fn subcommand(args: Vec<OsString>) -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// The optional lock features of scry-rs to turn on: those whose crate is in the dependency graph.
+fn lock_features(cargo: &OsString) -> Vec<&'static str> {
+    let Ok(output) = Command::new(cargo).args(["metadata", "--format-version", "1"]).output() else {
+        return Vec::new();
+    };
+    let Ok(metadata) = serde_json::from_slice::<serde_json::Value>(&output.stdout) else { return Vec::new() };
+    let packages: Vec<&str> =
+        metadata["packages"].as_array().into_iter().flatten().filter_map(|package| package["name"].as_str()).collect();
+    ["tokio"].into_iter().filter(|feature| packages.contains(feature)).collect()
 }
 
 fn target_directory(cargo: &OsString) -> Option<PathBuf> {

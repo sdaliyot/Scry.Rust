@@ -8,11 +8,6 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use scry::__private::HookSite;
-#[allow(unused_imports)] // the generated code imports every probe; which one resolves depends on the types
-use scry::__private::{
-    ViaDebug as _, ViaFromValue as _, ViaNoValue as _, ViaOpaque as _, ViaOtherMut as _, ViaReflect as _,
-    ViaReflectMut as _,
-};
 use scry::{Reflect, Registry, execute};
 use serde_json::{Value, json};
 
@@ -27,17 +22,17 @@ macro_rules! hooked {
             #[linkme(crate = scry::__private::linkme)]
             static REGISTERED: &HookSite = &SITE;
             let mut call = SITE.enter(|capture| {
-                $(capture.arg(stringify!($arg), (&&&scry::__private::Probe(&$arg)).scry_ref());)*
+                $(capture.arg(stringify!($arg), scry::__private::probe_ref!(&$arg));)*
             });
             $(let mut $arg = $arg;)*
             let skip: Option<$ret> = match &mut call {
                 Some(c) => match c.before() {
                     Some(changes) => {
                         $(if let Some(value) = changes.arg(stringify!($arg)) {
-                            c.change(stringify!($arg), (&&&scry::__private::ProbeMut::new(&mut $arg)).scry_mut(), value);
+                            c.change(stringify!($arg), scry::__private::probe_mut!(&mut $arg), value);
                         })*
                         match changes.result() {
-                            Some(value) => c.skip(value, (&&&scry::__private::ArgProbe::<$ret>::new()).scry_arg(value)),
+                            Some(value) => c.skip(value, scry::__private::probe_arg!($ret, value)),
                             None => None,
                         }
                     }
@@ -50,15 +45,15 @@ macro_rules! hooked {
                 None => scry::__private::run_once(move || -> $ret { $body }),
             };
             if let Some(c) = &mut call {
-                if let Some(value) = c.after((&&&scry::__private::Probe(&result)).scry_ref()) {
-                    match c.replace(&value, (&&&scry::__private::ArgProbe::<$ret>::new()).scry_arg(&value)) {
+                if let Some(value) = c.after(scry::__private::probe_ref!(&result)) {
+                    match c.replace(&value, scry::__private::probe_arg!($ret, &value)) {
                         Some(replacement) => result = replacement,
-                        None => c.change("result", (&&&scry::__private::ProbeMut::new(&mut result)).scry_mut(), &value),
+                        None => c.change("result", scry::__private::probe_mut!(&mut result), &value),
                     }
                 }
             }
             if let Some(call) = call {
-                call.exit((&&&scry::__private::Probe(&result)).scry_ref());
+                call.exit(scry::__private::probe_ref!(&result));
             }
             result
         }
