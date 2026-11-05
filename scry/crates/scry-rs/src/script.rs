@@ -424,8 +424,8 @@ fn change_engine() -> Engine {
     engine
 }
 
-/// Whether `script` compiles as a `hook before`/`hook after` script.
-pub(crate) fn check_change(script: &str) -> Result<(), Error> {
+/// Whether `script` compiles: a `hook before`/`hook after` script, or a `wait` condition.
+pub(crate) fn check(script: &str) -> Result<(), Error> {
     change_engine().compile(script).map(|_| ()).map_err(|error| Error::Script(error.to_string()))
 }
 

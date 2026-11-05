@@ -35,6 +35,7 @@ mod reflect;
 mod registry;
 #[cfg(feature = "script")]
 mod script;
+mod wait;
 
 #[cfg(feature = "dioxus")]
 #[doc(hidden)]

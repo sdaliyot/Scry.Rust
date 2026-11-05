@@ -109,13 +109,22 @@ fn respond(line: &str, token: &str, dispatch: &dyn Fn(Job) -> bool) -> (Value, b
     if let Some(result) = crate::hooks::command(command) {
         return (crate::command::reply(result, Vec::new()), true);
     }
+    // `wait` sends each evaluation to the registry's thread, and waits in between here.
+    if let Some(reply) = crate::wait::command(command, &mut |condition| run(&format!("eval {condition}"), dispatch)) {
+        return (reply, true);
+    }
+    (run(command, dispatch), true)
+}
+
+/// Runs a command on the registry's thread and returns its reply.
+fn run(command: &str, dispatch: &dyn Fn(Job) -> bool) -> Value {
     let (sender, receiver) = mpsc::channel();
     if !dispatch((command.to_owned(), sender)) {
-        return (failure("stopped", "the registry is no longer running"), true);
+        return failure("stopped", "the registry is no longer running");
     }
     match receiver.recv_timeout(REPLY_TIMEOUT) {
-        Ok(text) => (serde_json::from_str(&text).unwrap_or(Value::String(text)), true),
-        Err(_) => (failure("target_busy", "the registry's thread did not answer in time"), true),
+        Ok(text) => serde_json::from_str(&text).unwrap_or(Value::String(text)),
+        Err(_) => failure("target_busy", "the registry's thread did not answer in time"),
     }
 }
 

@@ -29,6 +29,7 @@ const USAGE: &str = "usage: scry list
 commands: roots | ls <path> | get <path> [depth] | set <path> <json> | help
           call <function or path.method> [json args...] | fns [filter]
           eval <rhai script> | eval --file <path> | eval -   (script from stdin)
+          wait [timeout=10s] [interval=100ms] <rhai condition> | assert <rhai condition>
           hooks [filter] | hook add <function> [depth=2] [capacity=1000] [self=true] [ttl=30m]
           hook read <id> [cursor] | hook wait <id> [timeout=30s] [cursor=n] [<rhai predicate>]
           hook before <id> [<rhai>] | hook after <id> [<rhai>]   (change calls; empty removes)

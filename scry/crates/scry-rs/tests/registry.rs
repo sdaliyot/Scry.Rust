@@ -301,3 +301,57 @@ fn a_global_signal_outside_the_runtime_is_an_error_not_a_panic() {
     assert_eq!(execute(&registry, "get global")["error"]["code"], json!("no_runtime"));
     assert_eq!(execute(&registry, "set global 2")["error"]["code"], json!("no_runtime"));
 }
+
+#[cfg(feature = "script")]
+mod conditions {
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    use super::*;
+
+    #[test]
+    fn wait_polls_until_the_condition_holds() {
+        let (registry, state) = registry();
+        let writer = {
+            let state = Arc::clone(&state);
+            thread::spawn(move || {
+                thread::sleep(Duration::from_millis(300));
+                *state.counter.lock().unwrap() = 99;
+            })
+        };
+        let started = Instant::now();
+        let reply = execute(&registry, "wait timeout=5 interval=20ms state.counter == 99");
+        assert_eq!(reply["result"]["satisfied"], json!(true), "{reply}");
+        assert!(reply["result"]["attempts"].as_u64().unwrap() > 1);
+        assert!(started.elapsed() < Duration::from_secs(3));
+        writer.join().unwrap();
+    }
+
+    #[test]
+    fn a_wait_that_times_out_reports_what_it_last_saw() {
+        let (registry, _) = registry();
+        let reply = execute(&registry, "wait timeout=300ms state.counter");
+        assert_eq!(reply["ok"], json!(true), "a timeout is not an error: {reply}");
+        assert_eq!(reply["result"]["satisfied"], json!(false));
+        assert_eq!(reply["result"]["lastValue"], json!(41));
+
+        let missing = execute(&registry, "wait timeout=200ms state.missing == 1");
+        assert_eq!(missing["result"]["lastError"]["code"], json!("no_such_member"), "{missing}");
+
+        let started = Instant::now();
+        let broken = execute(&registry, "wait timeout=5 state.counter ==");
+        assert_eq!(broken["error"]["code"], json!("script_error"));
+        assert!(started.elapsed() < Duration::from_secs(1), "a condition that does not compile fails at once");
+    }
+
+    #[test]
+    fn assert_passes_or_fails_once() {
+        let (registry, _) = registry();
+        assert_eq!(execute(&registry, "assert state.counter == 41")["result"]["satisfied"], json!(true));
+        let failed = execute(&registry, "assert state.items.len() > 5");
+        assert_eq!(failed["error"]["code"], json!("assertion_failed"));
+        assert!(failed["error"]["message"].as_str().unwrap().contains("gave false"), "{failed}");
+        assert_eq!(execute(&registry, "assert state.missing")["error"]["code"], json!("no_such_member"));
+        assert_eq!(execute(&registry, "assert")["error"]["code"], json!("bad_command"));
+    }
+}

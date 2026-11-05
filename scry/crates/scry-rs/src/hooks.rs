@@ -516,7 +516,7 @@ fn site(path: &str) -> Result<&'static HookSite, Error> {
 }
 
 /// `key=value` options at the start of `text`, and the rest.
-fn options(text: &str) -> (Vec<(&str, &str)>, &str) {
+pub(crate) fn options(text: &str) -> (Vec<(&str, &str)>, &str) {
     let mut options = Vec::new();
     let mut rest = text.trim_start();
     while let Some((word, after)) = rest.split_once(char::is_whitespace).or(Some((rest, ""))) {
@@ -540,15 +540,18 @@ fn number<T: std::str::FromStr>(key: &str, value: &str) -> Result<T, Error> {
     value.parse().map_err(|_| Error::BadCommand(format!("{key}={value} is not a number")))
 }
 
-/// `90`, `90s`, `30m`, `2h`.
-fn duration(key: &str, value: &str) -> Result<Duration, Error> {
+/// `90`, `90s`, `500ms`, `30m`, `2h`.
+pub(crate) fn duration(key: &str, value: &str) -> Result<Duration, Error> {
     let (digits, unit) = value.split_at(value.find(|c: char| !c.is_ascii_digit()).unwrap_or(value.len()));
     let amount: u64 = number(key, digits)?;
+    if unit == "ms" {
+        return Ok(Duration::from_millis(amount));
+    }
     let seconds = match unit {
         "" | "s" => amount,
         "m" => amount * 60,
         "h" => amount * 3600,
-        _ => return Err(Error::BadCommand(format!("{key}={value}: use s, m or h"))),
+        _ => return Err(Error::BadCommand(format!("{key}={value}: use ms, s, m or h"))),
     };
     Ok(Duration::from_secs(seconds))
 }
@@ -559,7 +562,7 @@ pub(crate) const HELP: &str = "hooks [filter] | hook add <function> [depth=2] [c
 
 #[cfg(feature = "script")]
 fn check_change_script(script: &str) -> Result<(), Error> {
-    crate::script::check_change(script)
+    crate::script::check(script)
 }
 
 #[cfg(not(feature = "script"))]

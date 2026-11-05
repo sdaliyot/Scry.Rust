@@ -66,6 +66,8 @@ pub enum Error {
     NoRuntime {
         type_name: &'static str,
     },
+    /// An `assert` condition did not hold.
+    AssertionFailed(String),
     /// A script did not parse, or failed while running.
     Script(String),
     /// A script ran past its time or size limits and was stopped.
@@ -94,6 +96,7 @@ impl Error {
             Error::NotCallable(_) => "not_callable",
             Error::Panicked(_) => "panicked",
             Error::NoRuntime { .. } => "no_runtime",
+            Error::AssertionFailed(_) => "assertion_failed",
             Error::Script(_) => "script_error",
             Error::ScriptLimit(_) => "script_limit",
         }
@@ -147,6 +150,7 @@ impl fmt::Display for Error {
             Error::NoRuntime { type_name } => {
                 write!(f, "{type_name} lives in the Dioxus runtime, which is not running on this thread")
             }
+            Error::AssertionFailed(message) => write!(f, "assertion failed: {message}"),
             Error::Script(message) => write!(f, "script error: {message}"),
             Error::ScriptLimit(message) => write!(f, "script stopped: {message}"),
         }

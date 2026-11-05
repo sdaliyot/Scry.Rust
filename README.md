@@ -83,6 +83,28 @@ A script runs on the registry's thread, which is the UI thread in a Dioxus app. 
 5 seconds, can't load modules, and has bounded string, array and map sizes. Scripting comes from
 `scry-rs`'s default `script` feature.
 
+## Waiting and asserting
+
+`wait` and `assert` check a Rhai condition against the app's state. A test or an agent can gate on
+the app reaching a state, or fail when it hasn't:
+
+```powershell
+scry wait timeout=15 'APP.stats.sold >= 10'        # {"satisfied": true, "attempts": 26, "elapsedMs": 2750}
+scry wait timeout=1 'APP.inventory.len() == 99'    # {"satisfied": false, "lastValue": false, ...}
+scry assert 'FILTER == "All"'                      # fails with assertion_failed when it doesn't hold
+```
+
+- **`wait`** evaluates the condition every `interval` (100 ms by default) until it gives `true`, or
+  `timeout` passes (10 s by default, at most 5 min).
+- **A timeout is not an error.** The reply says `satisfied: false` with the last value or error, so
+  read the flag rather than the exit code.
+- **Errors while waiting count as "not yet".** That covers a path that doesn't exist yet or a busy
+  lock.
+- **`assert`** evaluates once.
+- **A condition that doesn't compile** fails at once, for both.
+- **The UI isn't blocked.** Through the endpoint, each evaluation is one short trip to the registry
+  thread, and the waiting happens elsewhere, so a long wait never holds a Dioxus app's UI thread.
+
 ## Calling app code
 
 `cargo scry` also makes the app's functions and methods callable, with no attributes needed:

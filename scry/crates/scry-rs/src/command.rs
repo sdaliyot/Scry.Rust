@@ -26,6 +26,11 @@ const HELP: &str = "roots | ls <path> | get <path> [depth] | set <path> <json>
 /// `impls::Held`), so the app carries on as if nothing happened. Only a build with
 /// `panic = "abort"`, or an app panic hook that exits, still ends the process.
 pub fn execute(registry: &Registry, line: &str) -> Value {
+    // Called directly, a `wait` holds this thread between attempts; through the endpoint it
+    // waits on the connection's thread instead (see `endpoint`).
+    if let Some(reply) = crate::wait::command(line, &mut |condition| execute(registry, &format!("eval {condition}"))) {
+        return reply;
+    }
     let mut output = Vec::new();
     let result = catch_unwind(AssertUnwindSafe(|| match crate::hooks::command(line) {
         Some(result) => result,
@@ -92,7 +97,7 @@ fn run(registry: &Registry, line: &str, output: &mut Vec<String>) -> Result<Valu
             let _ = output;
             Err(Error::BadCommand("scripts need scry-rs's `script` feature, which this build turned off".into()))
         }
-        "help" | "" => Ok(Value::String(format!("{HELP} | {}", crate::hooks::HELP))),
+        "help" | "" => Ok(Value::String(format!("{HELP} | {} | {}", crate::wait::HELP, crate::hooks::HELP))),
         other => Err(Error::BadCommand(format!("unknown command '{other}'; {HELP}"))),
     }
 }
