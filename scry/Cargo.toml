@@ -12,3 +12,11 @@ publish = false
 
 [workspace.dependencies]
 serde_json = "1"
+
+# Smaller debug builds: line tables give file and line numbers in panics and backtraces, but not
+# variables in a debugger. Dependencies get no debug info at all.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
