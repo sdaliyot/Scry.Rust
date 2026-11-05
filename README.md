@@ -280,8 +280,39 @@ crate:
 - `tokio::sync` is supported when the app depends on tokio; `cargo scry` turns that on by itself.
 - std's `Mutex`, `RwLock` and `RefCell` are always supported.
 
-A dependency's serde support is often an optional feature (`chrono/serde`). Without it, that type
-falls back to its `Debug` text.
+**Containers.** Rust only sees the outer type, so a `Mutex<Tag>`, `Vec<Tag>` or `Option<Tag>` would
+count as reflectable only if `Tag` were. Instead, Scry unwraps containers using the type as written in
+the source. This covers fields and statics whose types are made of:
+- `Mutex`, `RwLock` or `RefCell`
+- `Arc`, `Rc`, `Box`, `LazyLock` or `OnceLock`
+- `Option`
+- `Vec`, `VecDeque`, arrays, `HashMap` or `BTreeMap`
+
+What sits inside gets the rules in the table, so this works:
+
+```powershell
+scry get APP.quiet                 # ["Regex(\"^Nothing$\")"]  - a parking_lot::RwLock<Vec<regex::Regex>>
+scry set APP.quiet[0] ^Hammer      # parsed with Regex's FromStr, written under the lock
+```
+
+Each element can be written, and assigning to an `Option` that is `None` builds the value. A
+collection can't be replaced in one assignment, though. A type alias hides how the type is written,
+so a field declared through one isn't unwrapped.
+
+**Serde features.** A dependency's serde support is often an optional feature (`chrono/serde`).
+`cargo scry` turns that feature on for each direct dependency that has one. It only affects
+`cargo scry` builds: serde features only add trait impls, and these builds use their own target
+directory. `SCRY_VERBOSE=1` lists the features it adds. To turn this off for a crate or for some of
+its dependencies:
+
+```toml
+[package.metadata.scry.serde]   # or [workspace.metadata.scry.serde] for every crate
+enabled = true                  # the default
+exclude = ["chrono"]            # dependencies by the name your manifest gives them
+```
+
+Only features with "serde" in their name are used. A broader feature that also pulls in serde, such
+as Dioxus's `fullstack`, is never turned on. Dependencies of dependencies aren't affected.
 
 ## What gets generated
 
@@ -320,7 +351,9 @@ Type names are shown short (`Vec<Item>`); `ls` also gives the full one as `fullT
 - Plain stack locals can't be reached. Only statics, and state reachable from them or from tracked hooks.
 - Types from other crates are reached through the traits they implement (see "Third-party types").
   A type with none of them shows as its `Debug` text or type name, and can't be written. Other
-  crates' methods can't be called.
+  crates' methods can't be called. A collection of a foreign type that has no serde support is
+  written element by element, not as a whole. A serde feature is only turned on for direct
+  dependencies.
 - Types created by third-party macros (Dioxus props, `bitflags!`) aren't rewritten.
 - A generic function or type can only be called with type arguments the crate itself uses with
   it. Instantiations that only appear inside other generic code, or that need a closure type, are

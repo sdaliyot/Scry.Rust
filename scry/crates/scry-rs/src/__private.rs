@@ -22,6 +22,7 @@ const MAX_DEBUG_LEN: usize = 1_000;
 
 pub use crate::probes::{Probe, ProbeMut};
 pub use crate::{probe_arg, probe_mut, probe_ref, probe_ref_arg};
+pub use scry_rs_derive::peeler_for;
 
 /// The owning counterpart of [`Probe`], for handles such as signals that a registry keeps a copy
 /// of: a navigable clone, a `Debug`-only clone, or just the type name.

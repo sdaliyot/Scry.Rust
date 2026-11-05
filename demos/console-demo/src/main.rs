@@ -30,6 +30,8 @@ pub struct AppState {
     rules: Mutex<Vec<Box<dyn PriceRule + Send>>>,
     labels: Mutex<Cache<u32, String>>,
     session: parking_lot::RwLock<Session>,
+    /// Sales whose label matches one of these are not shown as the last sale.
+    quiet: parking_lot::RwLock<Vec<regex::Regex>>,
     started: Instant,
 }
 
@@ -55,6 +57,7 @@ impl AppState {
                 opened: chrono::Utc::now(),
                 cashier: None,
             }),
+            quiet: parking_lot::RwLock::new(vec![regex::Regex::new("^Nothing$").expect("a valid pattern")]),
             started: Instant::now(),
         }
     }
@@ -133,7 +136,9 @@ fn worker_loop(state: &AppState) {
 
         stats.sold += 1;
         stats.revenue_cents += bounded[0];
-        stats.last_sale = Some(format!("{label} for {}", util::format_cents(bounded[0])));
+        if !state.quiet.read().iter().any(|pattern| pattern.is_match(&label)) {
+            stats.last_sale = Some(format!("{label} for {}", util::format_cents(bounded[0])));
+        }
     }
 }
 

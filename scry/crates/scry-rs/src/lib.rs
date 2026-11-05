@@ -33,6 +33,8 @@ mod impls;
 mod locks;
 mod path;
 #[doc(hidden)]
+pub mod peel;
+#[doc(hidden)]
 pub mod probes;
 mod reflect;
 mod registry;

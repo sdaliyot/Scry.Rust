@@ -9,7 +9,10 @@ use proc_macro::TokenStream;
 use proc_macro2::TokenStream as Tokens;
 use quote::{format_ident, quote};
 use syn::ext::IdentExt;
-use syn::{Data, DataEnum, DeriveInput, Fields, Ident, Index, Member, Type, Variant, parse_macro_input, parse_quote};
+use syn::{
+    Data, DataEnum, DeriveInput, Fields, GenericArgument, Ident, Index, Member, PathArguments, Type, Variant,
+    parse_macro_input, parse_quote,
+};
 
 #[proc_macro_derive(Reflect)]
 pub fn derive_reflect(input: TokenStream) -> TokenStream {
@@ -17,11 +20,23 @@ pub fn derive_reflect(input: TokenStream) -> TokenStream {
     expand(input).unwrap_or_else(syn::Error::into_compile_error).into()
 }
 
+/// `peeler_for!(Type)`: the peeler for a value of `Type` (see `scry::peel`), or `NoPeel`. For the
+/// statics `cargo scry` registers; the derive builds its fields' peelers itself.
+#[doc(hidden)]
+#[proc_macro]
+pub fn peeler_for(input: TokenStream) -> TokenStream {
+    let ty = parse_macro_input!(input as Type);
+    peeler(&ty, Some(&[])).unwrap_or_else(|| quote!(::scry::peel::NoPeel)).into()
+}
+
 fn expand(mut input: DeriveInput) -> syn::Result<Tokens> {
     // `as_any` - and with it, callable methods - needs `Self: 'static`. A type with lifetime
     // parameters never is; one with only type parameters is when they are, so its impl requires
     // that. Everything reachable from a static or a signal is `'static` anyway.
     let static_only = input.generics.lifetimes().next().is_none();
+    // Fields of a type with lifetimes are not peeled: a peeler is `'static`.
+    let params: Option<Vec<Ident>> =
+        static_only.then(|| input.generics.type_params().map(|parameter| parameter.ident.clone()).collect());
     let plain = input.generics.params.is_empty();
     let mut from_generics = input.generics.clone();
     for parameter in from_generics.type_params_mut() {
@@ -37,8 +52,8 @@ fn expand(mut input: DeriveInput) -> syn::Result<Tokens> {
     }
 
     let body = match &input.data {
-        Data::Struct(data) => expand_struct(&data.fields),
-        Data::Enum(data) => expand_enum(data),
+        Data::Struct(data) => expand_struct(&data.fields, params.as_deref()),
+        Data::Enum(data) => expand_enum(data, params.as_deref()),
         Data::Union(data) => {
             return Err(syn::Error::new_spanned(data.union_token, "Reflect cannot be derived for unions"));
         }
@@ -230,15 +245,105 @@ fn probe_imports() -> Tokens {
 }
 
 /// A field as `scry` reads it; see `scry::probes` for how its type decides that.
-fn read_probe(access: Tokens) -> Tokens {
-    quote!(::scry::__private::probe_ref!(#access))
+fn read_probe(access: Tokens, peel: &Option<Tokens>) -> Tokens {
+    match peel {
+        Some(peel) => quote!(::scry::__private::probe_ref!(#access, #peel)),
+        None => quote!(::scry::__private::probe_ref!(#access)),
+    }
 }
 
-fn write_probe(access: Tokens) -> Tokens {
-    quote!(::scry::__private::probe_mut!(#access))
+fn write_probe(access: Tokens, peel: &Option<Tokens>) -> Tokens {
+    match peel {
+        Some(peel) => quote!(::scry::__private::probe_mut!(#access, #peel)),
+        None => quote!(::scry::__private::probe_mut!(#access)),
+    }
 }
 
-fn expand_struct(fields: &Fields) -> Tokens {
+/// A peeler for a field whose type is a container the probes cannot see into - `Mutex<Tag>`,
+/// `Vec<Option<Tag>>` - built from how the type is written; see `scry::peel`. `None` for any other
+/// type, for one whose innermost type is always `Reflect` (a number, a `String`, a type
+/// parameter), and when `params` is `None` (a type with lifetimes).
+fn peeler(ty: &Type, params: Option<&[Ident]>) -> Option<Tokens> {
+    let params = params?;
+    let text = quote!(#ty).to_string();
+    if text.contains('\'') || text.contains('&') || text.contains("dyn ") || text.contains("impl ") {
+        return None;
+    }
+    let (peeler, leaf) = layer(ty)?;
+    let always_reflect = match leaf {
+        Type::Path(path) if path.qself.is_none() => path.path.get_ident().is_some_and(|ident| {
+            params.contains(ident)
+                || matches!(
+                    ident.to_string().as_str(),
+                    "bool"
+                        | "char"
+                        | "String"
+                        | "u8"
+                        | "u16"
+                        | "u32"
+                        | "u64"
+                        | "u128"
+                        | "usize"
+                        | "i8"
+                        | "i16"
+                        | "i32"
+                        | "i64"
+                        | "i128"
+                        | "isize"
+                        | "f32"
+                        | "f64"
+                )
+        }),
+        _ => false,
+    };
+    (!always_reflect).then_some(peeler)
+}
+
+/// The peeler for one container layer of `ty` and those inside it, and the innermost type; `None`
+/// when `ty` is not a container.
+fn layer(ty: &Type) -> Option<(Tokens, &Type)> {
+    let (shape, inner) = match ty {
+        Type::Paren(paren) => return layer(&paren.elem),
+        Type::Group(group) => return layer(&group.elem),
+        Type::Array(array) => (quote!(Each), &*array.elem),
+        Type::Path(path) if path.qself.is_none() => {
+            let last = path.path.segments.last()?;
+            let PathArguments::AngleBracketed(arguments) = &last.arguments else { return None };
+            let types: Vec<&Type> = arguments
+                .args
+                .iter()
+                .filter_map(|argument| match argument {
+                    GenericArgument::Type(ty) => Some(ty),
+                    _ => None,
+                })
+                .collect();
+            match (last.ident.to_string().as_str(), types.as_slice()) {
+                ("Mutex" | "RwLock" | "RefCell", [inner]) => (quote!(Locked), *inner),
+                ("Arc" | "Rc", [inner]) | ("LazyLock", [inner] | [inner, _]) => (quote!(Shared), *inner),
+                ("OnceLock", [inner]) => (quote!(Opt), *inner),
+                ("Box", [inner]) => (quote!(Boxed), *inner),
+                ("Option", [inner]) => (quote!(Opt), *inner),
+                ("Vec" | "VecDeque", [inner]) => (quote!(Each), *inner),
+                ("HashMap", [_, inner] | [_, inner, _]) | ("BTreeMap", [_, inner]) => (quote!(Each), *inner),
+                _ => return None,
+            }
+        }
+        _ => return None,
+    };
+    let (inner_peeler, leaf) = layer(inner).unwrap_or_else(|| {
+        let leaf = quote! {
+            ::scry::peel::leaf::<#inner>(
+                |value| ::scry::__private::probe_ref!(value),
+                |value| ::scry::__private::probe_mut!(value),
+                |value| ::scry::__private::probe_arg!(#inner, value),
+            )
+        };
+        (leaf, inner)
+    });
+    Some((quote!(::scry::peel::#shape(#inner_peeler)), leaf))
+}
+
+fn expand_struct(fields: &Fields, params: Option<&[Ident]>) -> Tokens {
     let fields = fields_of(fields);
     let kind = if fields.first().is_some_and(|field| matches!(field.member, Member::Unnamed(_))) {
         quote!(::scry::Kind::Tuple)
@@ -252,14 +357,14 @@ fn expand_struct(fields: &Fields) -> Tokens {
         .iter()
         .map(|field| {
             let member = &field.member;
-            read_probe(quote!(&self.#member))
+            read_probe(quote!(&self.#member), &peeler(field.ty, params))
         })
         .collect();
     let writes: Vec<Tokens> = fields
         .iter()
         .map(|field| {
             let member = &field.member;
-            write_probe(quote!(&mut self.#member))
+            write_probe(quote!(&mut self.#member), &peeler(field.ty, params))
         })
         .collect();
 
@@ -352,7 +457,7 @@ fn variant_pattern(variant: &Variant, fields: &[Field<'_>]) -> Tokens {
     }
 }
 
-fn expand_enum(data: &DataEnum) -> Tokens {
+fn expand_enum(data: &DataEnum, params: Option<&[Ident]>) -> Tokens {
     let imports = probe_imports();
     let mut member_arms = Vec::new();
     let mut snapshot_arms = Vec::new();
@@ -371,14 +476,14 @@ fn expand_enum(data: &DataEnum) -> Tokens {
             .iter()
             .map(|field| {
                 let binding = &field.binding;
-                read_probe(quote!(#binding))
+                read_probe(quote!(#binding), &peeler(field.ty, params))
             })
             .collect();
         let writes: Vec<Tokens> = fields
             .iter()
             .map(|field| {
                 let binding = &field.binding;
-                write_probe(quote!(#binding))
+                write_probe(quote!(#binding), &peeler(field.ty, params))
             })
             .collect();
 

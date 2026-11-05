@@ -186,3 +186,104 @@ fn third_party_values_can_be_built_for_calls() {
     let address: IpAddr = scry::__private::probe_arg!(IpAddr, &json!("::1")).unwrap();
     assert!(address.is_loopback());
 }
+
+/// Nothing at all: shown by type name, wherever it is.
+struct Secret;
+
+/// Foreign types inside containers, as written in the source: peeled layer by layer.
+#[derive(Reflect)]
+struct Peeled {
+    locked: parking_lot::Mutex<Tag>,
+    tags: Vec<Tag>,
+    maybe: Option<Tag>,
+    shared: std::sync::Arc<std::sync::Mutex<Vec<Tag>>>,
+    by_name: std::collections::HashMap<String, Tag>,
+    boxed: Box<Tag>,
+    fixed: [Option<Tag>; 2],
+    secret: std::cell::RefCell<Secret>,
+}
+
+fn peeled() -> (Registry, Rc<Peeled>) {
+    let tag = |text: &str| Tag(text.to_owned());
+    let state = Rc::new(Peeled {
+        locked: parking_lot::Mutex::new(tag("#locked")),
+        tags: vec![tag("#a"), tag("#b")],
+        maybe: None,
+        shared: std::sync::Arc::new(std::sync::Mutex::new(vec![tag("#s")])),
+        by_name: [("first".to_owned(), tag("#f"))].into(),
+        boxed: Box::new(tag("#box")),
+        fixed: [Some(tag("#x")), None],
+        secret: std::cell::RefCell::new(Secret),
+    });
+    let mut registry = Registry::new();
+    registry.add("peeled", Rc::clone(&state));
+    (registry, state)
+}
+
+#[test]
+fn foreign_types_inside_containers_are_reached_and_written() {
+    let (registry, state) = peeled();
+    assert_eq!(result(&registry, "get peeled.locked"), json!("Tag(\"#locked\")"));
+    result(&registry, "set peeled.locked #new");
+    assert_eq!(*state.locked.lock(), Tag("#new".into()), "written under the lock through FromStr");
+    assert_eq!(code(&registry, "set peeled.locked nope"), json!("type_mismatch"));
+
+    assert_eq!(result(&registry, "get peeled.tags"), json!(["Tag(\"#a\")", "Tag(\"#b\")"]));
+    assert_eq!(result(&registry, "ls peeled.tags")["kind"], json!("sequence"));
+    assert_eq!(code(&registry, "set peeled.tags[1] #c"), json!("not_writable"), "the registry holds it shared");
+
+    assert_eq!(result(&registry, "get peeled.maybe"), json!(null));
+    assert_eq!(result(&registry, "get peeled.shared[0]"), json!("Tag(\"#s\")"));
+    result(&registry, "set peeled.shared[0] #t");
+    assert_eq!(state.shared.lock().unwrap()[0], Tag("#t".into()), "through Arc, the lock and the Vec");
+
+    assert_eq!(result(&registry, "get peeled.by_name.first"), json!("Tag(\"#f\")"));
+    assert_eq!(result(&registry, "get peeled.boxed"), json!("Tag(\"#box\")"));
+    assert_eq!(result(&registry, "get peeled.fixed"), json!(["Tag(\"#x\")", null]));
+    assert_eq!(result(&registry, "get peeled.secret"), json!("<Secret>"));
+}
+
+#[test]
+fn peeled_values_are_written_with_exclusive_access() {
+    use scry::__private::probe_mut;
+    let tag = |text: &str| Tag(text.to_owned());
+    let mut state = Peeled {
+        locked: parking_lot::Mutex::new(tag("#l")),
+        tags: vec![tag("#a"), tag("#b")],
+        maybe: None,
+        shared: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+        by_name: [("first".to_owned(), tag("#f"))].into(),
+        boxed: Box::new(tag("#box")),
+        fixed: [None, None],
+        secret: std::cell::RefCell::new(Secret),
+    };
+    let set = |state: &mut Peeled, path: &str, value: serde_json::Value| {
+        // `a.b[1]` as segments.
+        let segments: Vec<scry::Segment> = path
+            .split(['.', '['])
+            .map(|part| match part.strip_suffix(']') {
+                Some(index) => scry::Segment::Index(index.parse().unwrap()),
+                None => scry::Segment::Field(part.to_owned()),
+            })
+            .collect();
+        let mut result = Ok(());
+        probe_mut!(state).write(&segments, &mut |target| {
+            result = target.assign(&value);
+            Ok(())
+        })?;
+        result
+    };
+    set(&mut state, "tags[1]", json!("#c")).unwrap();
+    assert_eq!(state.tags[1], tag("#c"));
+    set(&mut state, "maybe", json!("#m")).unwrap();
+    assert_eq!(state.maybe, Some(tag("#m")), "assigning into None builds the value");
+    set(&mut state, "maybe", json!(null)).unwrap();
+    assert_eq!(state.maybe, None);
+    set(&mut state, "by_name.first", json!("#g")).unwrap();
+    assert_eq!(state.by_name["first"], tag("#g"));
+    set(&mut state, "boxed", json!("#b2")).unwrap();
+    assert_eq!(*state.boxed, tag("#b2"));
+    set(&mut state, "fixed[1]", json!("#y")).unwrap();
+    assert_eq!(state.fixed[1], Some(tag("#y")));
+    assert_eq!(set(&mut state, "tags", json!(["#z"])).unwrap_err().code(), "not_writable");
+}

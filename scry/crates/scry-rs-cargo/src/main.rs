@@ -23,6 +23,7 @@
 
 mod config;
 mod edits;
+mod features;
 mod functions;
 mod generate;
 mod generics;
@@ -105,19 +106,33 @@ fn subcommand(args: Vec<OsString>) -> ExitCode {
     } else {
         cmd.arg(command).arg("--features").arg("scry").args(rest);
     }
-    // Support for third-party locks that scry-rs only builds when asked: turned on when the app
-    // itself depends on the crate, so it costs nothing otherwise.
-    for feature in lock_features(&cargo) {
-        cmd.arg("--features").arg(format!("scry/{feature}"));
+    // Lock support of scry-rs and serde support of the app's dependencies; see `features`.
+    let own_args = &rest[..rest.iter().position(|arg| arg == "--").unwrap_or(rest.len())];
+    let metadata = metadata(&cargo, own_args);
+    if let Some(metadata) = &metadata {
+        let cwd = env::current_dir().unwrap_or_default();
+        match features::extra(metadata, own_args, &cwd) {
+            Ok(extra) => {
+                if env::var_os("SCRY_VERBOSE").is_some() && !extra.is_empty() {
+                    eprintln!("cargo scry: adding features {}", extra.join(" "));
+                }
+                for feature in extra {
+                    cmd.arg("--features").arg(feature);
+                }
+            }
+            Err(error) => {
+                eprintln!("error: {error}");
+                return ExitCode::FAILURE;
+            }
+        }
     }
     cmd.env("RUSTC_WORKSPACE_WRAPPER", &exe).env(wrapper::GENERATOR_ID, generator_id());
     if env::var_os("CARGO_TARGET_DIR").is_none()
-        && !rest.iter().any(|arg| arg.to_string_lossy().starts_with("--target-dir"))
-        && let Some(target) = target_directory(&cargo)
+        && !own_args.iter().any(|arg| arg.to_string_lossy().starts_with("--target-dir"))
+        && let Some(target) = metadata.as_ref().and_then(|metadata| metadata["target_directory"].as_str())
     {
-        cmd.env("CARGO_TARGET_DIR", target.join("scry"));
+        cmd.env("CARGO_TARGET_DIR", PathBuf::from(target).join("scry"));
     }
-
     match cmd.status() {
         Ok(status) => ExitCode::from(status.code().unwrap_or(1).clamp(0, 255) as u8),
         Err(error) => {
@@ -127,19 +142,19 @@ fn subcommand(args: Vec<OsString>) -> ExitCode {
     }
 }
 
-/// The optional lock features of scry-rs to turn on: those whose crate is in the dependency graph.
-fn lock_features(cargo: &OsString) -> Vec<&'static str> {
-    let Ok(output) = Command::new(cargo).args(["metadata", "--format-version", "1"]).output() else {
-        return Vec::new();
-    };
-    let Ok(metadata) = serde_json::from_slice::<serde_json::Value>(&output.stdout) else { return Vec::new() };
-    let packages: Vec<&str> =
-        metadata["packages"].as_array().into_iter().flatten().filter_map(|package| package["name"].as_str()).collect();
-    ["tokio"].into_iter().filter(|feature| packages.contains(feature)).collect()
-}
-
-fn target_directory(cargo: &OsString) -> Option<PathBuf> {
-    let output = Command::new(cargo).args(["metadata", "--format-version", "1", "--no-deps"]).output().ok()?;
-    let metadata: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
-    metadata["target_directory"].as_str().map(PathBuf::from)
+/// `cargo metadata` for the workspace the command builds, honouring its `--manifest-path`.
+fn metadata(cargo: &OsString, args: &[OsString]) -> Option<serde_json::Value> {
+    let mut cmd = Command::new(cargo);
+    cmd.args(["metadata", "--format-version", "1"]);
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        let text = arg.to_string_lossy();
+        if text == "--manifest-path" {
+            cmd.arg(arg).args(args.next());
+        } else if text.starts_with("--manifest-path=") {
+            cmd.arg(arg);
+        }
+    }
+    let output = cmd.stderr(std::process::Stdio::null()).output().ok()?;
+    serde_json::from_slice(&output.stdout).ok()
 }

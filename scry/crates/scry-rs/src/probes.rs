@@ -20,12 +20,14 @@
 //!    collections): a sequence or map whose items stay navigable, writable through their own
 //!    locks, and callable.
 //! 5. `serde::Serialize` (`chrono`, `uuid`, `url`, `rust_decimal`, ...): a structured JSON view.
-//! 6. `Debug`: its text.
-//! 7. Anything else: its type name.
+//! 6. Peeled: a container named in the source - `Mutex<Vec<Tag>>` - taken apart layer by layer,
+//!    with the type inside probed where it is concrete; see [`crate::peel`].
+//! 7. `Debug`: its text.
+//! 8. Anything else: its type name.
 //!
 //! Writing one: `Reflect`; `DerefMut` to a `Reflect` target; `Serialize + Deserialize`, by
 //! round-tripping the value through JSON (so `set at.date 2026-01-01` and `set at.offset.hours 2`
-//! both work); `FromStr`, from a JSON string; else refused. Building one from JSON, for a call or
+//! both work); `FromStr`, from a JSON string; peeled; else refused. Building one from JSON, for a call or
 //! a hook: `FromValue`, then `Deserialize`, then `FromStr`.
 //!
 //! None of this names a crate: any type that implements these std and serde traits is covered,
@@ -46,30 +48,39 @@ use serde_json::Value;
 
 use crate::__private::{DebugValue, FieldMut, FieldRef, OpaqueValue, truncated};
 use crate::from_value::FromValue;
+use crate::peel::Peeler;
 use crate::{Error, Kind, Member, Reflect, Segment, Visit, VisitMut};
 
 /// The most elements a third-party collection lists.
 const MAX_ELEMENTS: usize = 100;
 
-/// `probe_ref!(&value)`: a [`FieldRef`] for reading `value`.
+/// `probe_ref!(&value)`: a [`FieldRef`] for reading `value`. `probe_ref!(&value, peeler)` also
+/// tries `peeler` (see [`crate::peel`]) before falling back to `Debug`.
 #[macro_export]
 #[doc(hidden)]
 macro_rules! probe_ref {
-    ($value:expr) => {{
+    ($value:expr) => {
+        $crate::probe_ref!($value, $crate::peel::NoPeel)
+    };
+    ($value:expr, $peel:expr) => {{
         #[allow(unused_imports)]
         use $crate::probes::read::*;
-        (&&&&&&&$crate::probes::Probe($value)).scry_ref()
+        (&&&&&&&&$crate::probes::Probe($value, $peel)).scry_ref()
     }};
 }
 
-/// `probe_mut!(&mut value)`: a [`FieldMut`] for writing `value`.
+/// `probe_mut!(&mut value)`: a [`FieldMut`] for writing `value`; `probe_mut!(&mut value, peeler)`
+/// as for [`probe_ref!`](crate::probe_ref).
 #[macro_export]
 #[doc(hidden)]
 macro_rules! probe_mut {
-    ($value:expr) => {{
+    ($value:expr) => {
+        $crate::probe_mut!($value, $crate::peel::NoPeel)
+    };
+    ($value:expr, $peel:expr) => {{
         #[allow(unused_imports)]
         use $crate::probes::write::*;
-        (&&&&&&$crate::probes::ProbeMut::new($value)).scry_mut()
+        (&&&&&&&$crate::probes::ProbeMut::new($value, $peel)).scry_mut()
     }};
 }
 
@@ -98,7 +109,7 @@ macro_rules! probe_ref_arg {
 
 // --- Reading ------------------------------------------------------------------------------------
 
-pub struct Probe<'a, T>(pub &'a T);
+pub struct Probe<'a, T, P>(pub &'a T, pub P);
 
 /// The reading tiers, as traits for the macro to import.
 pub mod read {
@@ -108,7 +119,7 @@ pub mod read {
         fn scry_ref(&self) -> FieldRef<'a>;
     }
 
-    impl<'a, T: Reflect> ViaReflect<'a> for &&&&&&Probe<'a, T> {
+    impl<'a, T: Reflect, P> ViaReflect<'a> for &&&&&&&Probe<'a, T, P> {
         fn scry_ref(&self) -> FieldRef<'a> {
             FieldRef::Reflect(self.0)
         }
@@ -118,7 +129,7 @@ pub mod read {
         fn scry_ref(&self) -> FieldRef<'a>;
     }
 
-    impl<'a, T: Deref> ViaDeref<'a> for &&&&&Probe<'a, T>
+    impl<'a, T: Deref, P> ViaDeref<'a> for &&&&&&Probe<'a, T, P>
     where
         T::Target: Reflect + Sized,
     {
@@ -131,7 +142,7 @@ pub mod read {
         fn scry_ref(&self) -> FieldRef<'a>;
     }
 
-    impl<'a, W: Wrapper> ViaWrappedSerde<'a> for &&&&Probe<'a, W>
+    impl<'a, W: Wrapper, P> ViaWrappedSerde<'a> for &&&&&Probe<'a, W, P>
     where
         W::Inner: Serialize + DeserializeOwned,
     {
@@ -144,7 +155,7 @@ pub mod read {
         fn scry_ref(&self) -> FieldRef<'a>;
     }
 
-    impl<'a, T> ViaIter<'a> for &&&Probe<'a, T>
+    impl<'a, T, P> ViaIter<'a> for &&&&Probe<'a, T, P>
     where
         &'a T: IntoIterator,
         <&'a T as IntoIterator>::Item: Element<'a>,
@@ -158,9 +169,19 @@ pub mod read {
         fn scry_ref(&self) -> FieldRef<'a>;
     }
 
-    impl<'a, T: Serialize> ViaSerialize<'a> for &&Probe<'a, T> {
+    impl<'a, T: Serialize, P> ViaSerialize<'a> for &&&Probe<'a, T, P> {
         fn scry_ref(&self) -> FieldRef<'a> {
             FieldRef::Owned(Box::new(SerdeView::of(self.0)))
+        }
+    }
+
+    pub trait ViaPeel<'a> {
+        fn scry_ref(&self) -> FieldRef<'a>;
+    }
+
+    impl<'a, T, P: Peeler<T>> ViaPeel<'a> for &&Probe<'a, T, P> {
+        fn scry_ref(&self) -> FieldRef<'a> {
+            self.1.peel_ref(self.0)
         }
     }
 
@@ -168,7 +189,7 @@ pub mod read {
         fn scry_ref(&self) -> FieldRef<'a>;
     }
 
-    impl<'a, T: Debug> ViaDebug<'a> for &Probe<'a, T> {
+    impl<'a, T: Debug, P> ViaDebug<'a> for &Probe<'a, T, P> {
         fn scry_ref(&self) -> FieldRef<'a> {
             FieldRef::Debug(DebugValue::new(self.0, type_name::<T>()))
         }
@@ -178,7 +199,7 @@ pub mod read {
         fn scry_ref(&self) -> FieldRef<'a>;
     }
 
-    impl<'a, T> ViaOpaque<'a> for Probe<'a, T> {
+    impl<'a, T, P> ViaOpaque<'a> for Probe<'a, T, P> {
         fn scry_ref(&self) -> FieldRef<'a> {
             FieldRef::Opaque(OpaqueValue::new(type_name::<T>()))
         }
@@ -522,11 +543,11 @@ where
 
 /// The mutable counterpart of [`Probe`]. Method resolution needs `&self` receivers, so the
 /// exclusive reference sits in a `Cell` and is taken out exactly once.
-pub struct ProbeMut<'a, T>(Cell<Option<&'a mut T>>);
+pub struct ProbeMut<'a, T, P>(Cell<Option<&'a mut T>>, P);
 
-impl<'a, T> ProbeMut<'a, T> {
-    pub fn new(value: &'a mut T) -> Self {
-        Self(Cell::new(Some(value)))
+impl<'a, T, P> ProbeMut<'a, T, P> {
+    pub fn new(value: &'a mut T, peel: P) -> Self {
+        Self(Cell::new(Some(value)), peel)
     }
 
     fn take(&self) -> &'a mut T {
@@ -542,7 +563,7 @@ pub mod write {
         fn scry_mut(&self) -> FieldMut<'a>;
     }
 
-    impl<'a, T: Reflect> ViaReflectMut<'a> for &&&&&ProbeMut<'a, T> {
+    impl<'a, T: Reflect, P> ViaReflectMut<'a> for &&&&&&ProbeMut<'a, T, P> {
         fn scry_mut(&self) -> FieldMut<'a> {
             FieldMut::Reflect(self.take())
         }
@@ -552,7 +573,7 @@ pub mod write {
         fn scry_mut(&self) -> FieldMut<'a>;
     }
 
-    impl<'a, T: DerefMut> ViaDerefMut<'a> for &&&&ProbeMut<'a, T>
+    impl<'a, T: DerefMut, P> ViaDerefMut<'a> for &&&&&ProbeMut<'a, T, P>
     where
         T::Target: Reflect + Sized,
     {
@@ -565,7 +586,7 @@ pub mod write {
         fn scry_mut(&self) -> FieldMut<'a>;
     }
 
-    impl<'a, W: Wrapper> ViaWrappedSerdeMut<'a> for &&&ProbeMut<'a, W>
+    impl<'a, W: Wrapper, P> ViaWrappedSerdeMut<'a> for &&&&ProbeMut<'a, W, P>
     where
         W::Inner: Serialize + DeserializeOwned,
     {
@@ -579,7 +600,7 @@ pub mod write {
         fn scry_mut(&self) -> FieldMut<'a>;
     }
 
-    impl<'a, T: Serialize + DeserializeOwned> ViaSerdeMut<'a> for &&ProbeMut<'a, T> {
+    impl<'a, T: Serialize + DeserializeOwned, P> ViaSerdeMut<'a> for &&&ProbeMut<'a, T, P> {
         fn scry_mut(&self) -> FieldMut<'a> {
             FieldMut::Owned(Box::new(SerdeMut { value: self.take() }))
         }
@@ -589,7 +610,7 @@ pub mod write {
         fn scry_mut(&self) -> FieldMut<'a>;
     }
 
-    impl<'a, T: FromStr + 'a> ViaFromStrMut<'a> for &ProbeMut<'a, T>
+    impl<'a, T: FromStr + 'a, P> ViaFromStrMut<'a> for &&ProbeMut<'a, T, P>
     where
         T::Err: Display,
     {
@@ -598,11 +619,21 @@ pub mod write {
         }
     }
 
+    pub trait ViaPeelMut<'a> {
+        fn scry_mut(&self) -> FieldMut<'a>;
+    }
+
+    impl<'a, T, P: Peeler<T>> ViaPeelMut<'a> for &ProbeMut<'a, T, P> {
+        fn scry_mut(&self) -> FieldMut<'a> {
+            self.1.peel_mut(self.take())
+        }
+    }
+
     pub trait ViaOtherMut<'a> {
         fn scry_mut(&self) -> FieldMut<'a>;
     }
 
-    impl<'a, T> ViaOtherMut<'a> for ProbeMut<'a, T> {
+    impl<'a, T, P> ViaOtherMut<'a> for ProbeMut<'a, T, P> {
         fn scry_mut(&self) -> FieldMut<'a> {
             FieldMut::Other(type_name::<T>())
         }

@@ -213,7 +213,10 @@ impl<'ast> Visit<'ast> for Generator<'_> {
             let mut path: Vec<&str> = self.fns.iter().map(String::as_str).collect();
             path.push(&name);
             let path = path.join("::");
-            self.edits.insert(self.source.end(item.semi_token.span), static_registration(&name, &path));
+            self.edits.insert(
+                self.source.end(item.semi_token.span),
+                static_registration(&name, &path, &item.ty.to_token_stream().to_string()),
+            );
             self.report.generated("static", &path);
         } else {
             self.report.skipped("static", &name, "a `static mut` cannot be referenced safely");
@@ -678,14 +681,16 @@ const IMPL_METHODS: &str = " #[allow(clippy::all, clippy::pedantic, clippy::nurs
     fn __scry_mut(&mut self) -> ::scry::__private::FieldMut<'_> { \
     ::scry::__private::probe_mut!(self) } ";
 
-fn static_registration(name: &str, path: &str) -> String {
+/// Registers a static, with a peeler for its type (see `scry::peel`) so a foreign type inside a
+/// container the static's type names is reached.
+fn static_registration(name: &str, path: &str, ty: &str) -> String {
     format!(
         " #[::scry::__private::linkme::distributed_slice(::scry::__private::STATICS)] \
          #[linkme(crate = ::scry::__private::linkme)] #[doc(hidden)] #[allow(non_upper_case_globals, clippy::all, clippy::pedantic, clippy::nursery, clippy::restriction)] \
          static __SCRY_STATIC_{name}: ::scry::__private::StaticEntry = {{ \
          fn __scry_register(registry: &mut ::scry::Registry) {{ \
          registry.__add_field(::core::concat!(::core::module_path!(), \"::\", {path:?}), \
-         ::scry::__private::probe_ref!(&{name})); }} __scry_register }};"
+         ::scry::__private::probe_ref!(&{name}, ::scry::__private::peeler_for!({ty}))); }} __scry_register }};"
     )
 }
 
