@@ -130,7 +130,7 @@ impl<T> ViaOpaqueOwned for ProbeOwned<'_, T> {
 }
 
 /// Registers one `static` with a registry. The generator emits one per static, next to it, into
-/// [`STATICS`]; the linker gathers them from every crate into one list.
+/// `STATICS`; the linker gathers them from every crate into one list.
 pub type StaticEntry = fn(&mut Registry);
 
 #[linkme::distributed_slice]
@@ -158,6 +158,10 @@ macro_rules! __reflect_dyn {
 
             fn members(&self) -> ::std::vec::Vec<$crate::Member> {
                 <Self as $($trait_path)*>::__scry_ref(self).get().members()
+            }
+
+            fn member_count(&self) -> usize {
+                <Self as $($trait_path)*>::__scry_ref(self).get().member_count()
             }
 
             fn snapshot(&self, depth: usize) -> $crate::Value {

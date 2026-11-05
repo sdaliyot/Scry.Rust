@@ -11,6 +11,9 @@ publish.workspace = true
 name = "scry"
 
 [features]
+default = ["script"]
+# The `eval` command: Rhai scripts that navigate, read and write the registry.
+script = ["dep:rhai"]
 # Reflect impls for Dioxus signals. They are owned by the UI thread, so a registry that holds them
 # has to be driven from that thread too.
 dioxus = ["dep:dioxus-signals", "dep:dioxus-core", "dep:futures-channel", "dep:futures-util"]
@@ -22,6 +25,7 @@ serde_json.workspace = true
 linkme = "0.3"
 # The endpoint's capability token.
 getrandom = "0.3"
+rhai = { version = "1.27", optional = true }
 dioxus-signals = { version = "0.7", optional = true }
 dioxus-core = { version = "0.7", optional = true }
 futures-channel = { version = "0.3", optional = true }

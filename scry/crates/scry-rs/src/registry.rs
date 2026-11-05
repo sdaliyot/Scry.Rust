@@ -1,8 +1,10 @@
+use std::rc::Rc;
+
 use serde_json::{Map, Value, json};
 
 use crate::__private::FieldRef;
 use crate::path::parse;
-use crate::{Error, Member, Reflect, Segment};
+use crate::{Error, Member, Reflect, Segment, Visit};
 
 /// Named roots that paths start from.
 ///
@@ -10,7 +12,8 @@ use crate::{Error, Member, Reflect, Segment};
 /// lives on the thread that owns its roots, and other threads reach it by sending it requests.
 #[derive(Default)]
 pub struct Registry {
-    roots: Vec<(String, Root)>,
+    /// Shared only while a script runs, whose handles keep their own reference; see [`Registry::share`].
+    roots: Rc<Vec<(String, Root)>>,
 }
 
 enum Root {
@@ -46,7 +49,7 @@ impl Registry {
         for register in crate::__private::STATICS {
             register(&mut registry);
         }
-        registry.roots.sort_by(|(a, _), (b, _)| a.cmp(b));
+        registry.roots_mut().sort_by(|(a, _), (b, _)| a.cmp(b));
         #[cfg(feature = "dioxus")]
         registry.add("ui", crate::dioxus_hooks::Ui);
         registry
@@ -69,9 +72,21 @@ impl Registry {
     }
 
     fn insert(&mut self, name: String, root: Root) -> &mut Self {
-        self.roots.retain(|(existing, _)| *existing != name);
-        self.roots.push((name, root));
+        let roots = self.roots_mut();
+        roots.retain(|(existing, _)| *existing != name);
+        roots.push((name, root));
         self
+    }
+
+    fn roots_mut(&mut self) -> &mut Vec<(String, Root)> {
+        Rc::get_mut(&mut self.roots).expect("roots are added before the registry is shared")
+    }
+
+    /// A second handle on the same roots, for the handles a script holds. Dropped with the script,
+    /// so roots can still be added afterwards.
+    #[cfg_attr(not(feature = "script"), allow(dead_code))]
+    pub(crate) fn share(&self) -> Registry {
+        Registry { roots: Rc::clone(&self.roots) }
     }
 
     pub fn roots(&self) -> Vec<Member> {
@@ -80,18 +95,36 @@ impl Registry {
 
     fn resolve(&self, path: &str) -> Result<(&dyn Reflect, Vec<Segment>), Error> {
         let (root, segments) = parse(path)?;
-        Ok((self.find(&root)?.get(), segments))
+        Ok((self.find(&root)?.1.get(), segments))
+    }
+
+    /// The full name of the root `root` refers to.
+    #[cfg_attr(not(feature = "script"), allow(dead_code))]
+    pub(crate) fn canonical(&self, root: &str) -> Result<&str, Error> {
+        Ok(&self.find(root)?.0)
+    }
+
+    /// Resolves `segments` below `root` and calls `visit` on the result.
+    #[cfg_attr(not(feature = "script"), allow(dead_code))]
+    pub(crate) fn read_at(&self, root: &str, segments: &[Segment], visit: Visit<'_>) -> Result<(), Error> {
+        self.find(root)?.1.get().read(segments, visit)
+    }
+
+    /// Assigns `value` to what `segments` below `root` resolve to.
+    #[cfg_attr(not(feature = "script"), allow(dead_code))]
+    pub(crate) fn set_at(&self, root: &str, segments: &[Segment], value: &Value) -> Result<(), Error> {
+        self.find(root)?.1.get().write_shared(segments, &mut |target| target.assign(value))
     }
 
     /// An exact root name, or the unique one ending in `::name`.
-    fn find(&self, root: &str) -> Result<&Root, Error> {
-        if let Some((_, value)) = self.roots.iter().find(|(name, _)| name == root) {
-            return Ok(value);
+    fn find(&self, root: &str) -> Result<&(String, Root), Error> {
+        if let Some(entry) = self.roots.iter().find(|(name, _)| name == root) {
+            return Ok(entry);
         }
         let suffix = format!("::{root}");
         let matches: Vec<&(String, Root)> = self.roots.iter().filter(|(name, _)| name.ends_with(&suffix)).collect();
         match matches.as_slice() {
-            [(_, value)] => Ok(value),
+            [entry] => Ok(entry),
             [] => Err(Error::NoSuchRoot(root.to_owned())),
             _ => Err(Error::AmbiguousRoot {
                 name: root.to_owned(),
@@ -132,7 +165,7 @@ impl Registry {
     /// Assigns `value` at `path`. The path must pass a lock, atomic or signal; see
     /// [`Reflect::write_shared`].
     pub fn set(&self, path: &str, value: &Value) -> Result<(), Error> {
-        let (root, segments) = self.resolve(path)?;
-        root.write_shared(&segments, &mut |target| target.assign(value))
+        let (root, segments) = parse(path)?;
+        self.set_at(&root, &segments, value)
     }
 }

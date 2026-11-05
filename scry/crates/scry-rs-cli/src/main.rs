@@ -6,15 +6,16 @@
 //! ```
 //!
 //! A command is what the registry understands - `roots`, `ls <path>`, `get <path> [depth]`,
-//! `set <path> <json>` - and its reply is printed as one line of JSON. The exit code is 0 when the
-//! reply is `"ok": true`. With a single target running, `--pid` can be left out.
+//! `set <path> <json>`, `eval <rhai script>` - and its reply is printed as one line of JSON. The
+//! exit code is 0 when the reply is `"ok": true`. With a single target running, `--pid` can be
+//! left out. `eval --file PATH` and `eval -` read a longer script from a file or stdin.
 //!
 //! Targets are found through the descriptors they write (see `scry::endpoint`); the token in a
 //! descriptor is sent with each request and never printed.
 
 use std::env;
 use std::fs;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -26,7 +27,8 @@ const USAGE: &str = "\
 usage: scry list
        scry [--pid N | --process NAME] <command>
 
-commands: roots | ls <path> | get <path> [depth] | set <path> <json> | help";
+commands: roots | ls <path> | get <path> [depth] | set <path> <json> | help
+          eval <rhai script> | eval --file <path> | eval -   (script from stdin)";
 
 /// Must match `scry::endpoint::targets_dir`.
 fn targets_dir() -> PathBuf {
@@ -125,6 +127,10 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
+    let command = match command(&args) {
+        Ok(command) => command,
+        Err(error) => return fail("usage", &error),
+    };
     let candidates: Vec<Target> = targets()
         .into_iter()
         .filter(|target| pid.is_none_or(|pid| target.pid() == pid))
@@ -139,13 +145,30 @@ fn main() -> ExitCode {
         }
     };
 
-    match send(target, &args.join(" ")) {
+    match send(target, &command) {
         Ok(reply) => {
             println!("{reply}");
             if reply["ok"] == true { ExitCode::SUCCESS } else { ExitCode::FAILURE }
         }
         Err(error) => fail("connection_failed", &error),
     }
+}
+
+/// The command to send: the words as given, except that `eval --file PATH` and `eval -` take the
+/// script from a file or stdin.
+fn command(args: &[String]) -> Result<String, String> {
+    let script = match args {
+        [verb, flag, path] if verb == "eval" && flag == "--file" => {
+            fs::read_to_string(path).map_err(|error| format!("cannot read {path}: {error}"))?
+        }
+        [verb, dash] if verb == "eval" && dash == "-" => {
+            let mut script = String::new();
+            io::stdin().read_to_string(&mut script).map_err(|error| format!("cannot read stdin: {error}"))?;
+            script
+        }
+        _ => return Ok(args.join(" ")),
+    };
+    Ok(format!("eval {script}"))
 }
 
 fn send(target: &Target, command: &str) -> Result<Value, String> {

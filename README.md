@@ -53,6 +53,34 @@ becomes `cargo scry run -p console-demo`.
 For `dx-demo`, the component signals are under `ui`: `scry get ui`, `scry set ui.App.uptime 1000`,
 `scry set FILTER Done`.
 
+## Scripts
+
+`scry eval <script>` runs a [Rhai](https://rhai.rs) script in the app (`scry eval --file x.rhai`, or
+`scry eval -` for stdin). Roots are variables, members are reached as in Rust, and assignments write
+through the same rules as `set`:
+
+```rhai
+for rule in APP.rules { print(rule.type_name()); }
+APP.rules[0].percent = 25;
+APP.stats.ticks += 1000;
+if FILTER == "All" { FILTER = "Done"; }
+#{ items: APP.inventory.items.len(), first: APP.inventory.items[0].name }
+```
+
+The reply's `result` is the script's last value as JSON, and `output` holds what it printed.
+
+- A value with members (a struct, a list, a map) reads as a live handle that is re-read on every
+  access.
+- Everything else reads as a plain copy.
+- Handles also have methods: `get()` / `get(depth)` for a snapshot, plus `set(v)`, `len()`,
+  `members()`, `children()`, `type_name()`, `kind()` and `path()`.
+- A root without members, such as `FILTER`, is a plain variable. It is written back when the script
+  ends without an error.
+
+A script runs on the registry's thread, which is the UI thread in a Dioxus app. It is stopped after
+5 seconds, can't load modules, and has bounded string, array and map sizes. Scripting comes from
+`scry-rs`'s default `script` feature.
+
 ## What gets generated
 
 `cargo scry` compiles a rewritten copy of each opted-in crate. The copy and a `scry-report.txt` listing
@@ -78,5 +106,6 @@ with `not_writable`, because writing through a shared reference is undefined beh
 - Plain stack locals can't be reached. Only statics, and state reachable from them or from tracked hooks.
 - Types from other crates show as `Debug` text or a type name, except the std types and Dioxus signals `scry-rs` supports.
 - Types created by third-party macros (Dioxus props, `bitflags!`) aren't rewritten.
-- Function and method invocation isn't implemented yet.
+- Function and method invocation isn't implemented yet, so scripts can read and assign but not call app code.
+- Script variables don't survive between `eval` calls.
 - `cargo scry clippy` doesn't work, because clippy uses the same wrapper slot.

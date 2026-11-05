@@ -59,6 +59,12 @@ pub trait Reflect {
         Vec::new()
     }
 
+    /// How many children this value has. Unlike [`Reflect::members`], which lists at most 100
+    /// elements of a collection, this is the full count.
+    fn member_count(&self) -> usize {
+        self.members().len()
+    }
+
     /// A JSON view of the value, `depth` levels deep. Deeper values are replaced by a
     /// `"<TypeName>"` placeholder, so a snapshot of a large graph stays bounded.
     fn snapshot(&self, depth: usize) -> Value;

@@ -19,6 +19,10 @@ pub enum Error {
     LockBusy { type_name: &'static str },
     BadPath(String),
     BadCommand(String),
+    /// A script did not parse, or failed while running.
+    Script(String),
+    /// A script ran past its time or size limits and was stopped.
+    ScriptLimit(String),
 }
 
 impl Error {
@@ -35,6 +39,8 @@ impl Error {
             Error::LockBusy { .. } => "lock_busy",
             Error::BadPath(_) => "bad_path",
             Error::BadCommand(_) => "bad_command",
+            Error::Script(_) => "script_error",
+            Error::ScriptLimit(_) => "script_limit",
         }
     }
 
@@ -70,6 +76,8 @@ impl fmt::Display for Error {
             Error::LockBusy { type_name } => write!(f, "{type_name} stayed locked by the application; try again"),
             Error::BadPath(message) => write!(f, "bad path: {message}"),
             Error::BadCommand(message) => write!(f, "bad command: {message}"),
+            Error::Script(message) => write!(f, "script error: {message}"),
+            Error::ScriptLimit(message) => write!(f, "script stopped: {message}"),
         }
     }
 }

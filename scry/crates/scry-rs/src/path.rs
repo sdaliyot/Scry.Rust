@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::fmt;
 
 use crate::Error;
@@ -14,6 +15,15 @@ impl Segment {
         match self {
             Segment::Field(name) => Some(name),
             Segment::Index(_) => None,
+        }
+    }
+
+    /// The member this names: a field name, or for an index its digits, so `[1]` and `.1` both
+    /// reach a tuple's second field.
+    pub fn name(&self) -> Cow<'_, str> {
+        match self {
+            Segment::Field(name) => Cow::Borrowed(name),
+            Segment::Index(index) => Cow::Owned(index.to_string()),
         }
     }
 

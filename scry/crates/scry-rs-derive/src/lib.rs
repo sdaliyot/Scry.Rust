@@ -125,8 +125,8 @@ fn expand_struct(fields: &Fields) -> Tokens {
             let ::core::option::Option::Some((segment, rest)) = path.split_first() else {
                 return visit(self);
             };
-            match segment.field() {
-                #(::core::option::Option::Some(#names) => #reads.read(rest, visit),)*
+            match &*segment.name() {
+                #(#names => #reads.read(rest, visit),)*
                 _ => ::core::result::Result::Err(::scry::__private::no_member(self.type_name(), segment)),
             }
         }
@@ -137,8 +137,8 @@ fn expand_struct(fields: &Fields) -> Tokens {
                 return visit(self);
             };
             let type_name = self.type_name();
-            match segment.field() {
-                #(::core::option::Option::Some(#names) => #writes.write(rest, visit),)*
+            match &*segment.name() {
+                #(#names => #writes.write(rest, visit),)*
                 _ => ::core::result::Result::Err(::scry::__private::no_member(type_name, segment)),
             }
         }
@@ -148,8 +148,8 @@ fn expand_struct(fields: &Fields) -> Tokens {
             let ::core::option::Option::Some((segment, rest)) = path.split_first() else {
                 return ::core::result::Result::Err(::scry::__private::needs_interior_mutability(self.type_name()));
             };
-            match segment.field() {
-                #(::core::option::Option::Some(#names) => #reads.write_shared(rest, visit),)*
+            match &*segment.name() {
+                #(#names => #reads.write_shared(rest, visit),)*
                 _ => ::core::result::Result::Err(::scry::__private::no_member(self.type_name(), segment)),
             }
         }
@@ -238,20 +238,20 @@ fn expand_enum(data: &DataEnum) -> Tokens {
             }
         });
         read_arms.push(quote! {
-            #pattern => match segment.field() {
-                #(::core::option::Option::Some(#names) => #reads.read(rest, visit),)*
+            #pattern => match &*segment.name() {
+                #(#names => #reads.read(rest, visit),)*
                 _ => ::core::result::Result::Err(::scry::__private::no_member(type_name, segment)),
             },
         });
         write_arms.push(quote! {
-            #pattern => match segment.field() {
-                #(::core::option::Option::Some(#names) => #writes.write(rest, visit),)*
+            #pattern => match &*segment.name() {
+                #(#names => #writes.write(rest, visit),)*
                 _ => ::core::result::Result::Err(::scry::__private::no_member(type_name, segment)),
             },
         });
         write_shared_arms.push(quote! {
-            #pattern => match segment.field() {
-                #(::core::option::Option::Some(#names) => #reads.write_shared(rest, visit),)*
+            #pattern => match &*segment.name() {
+                #(#names => #reads.write_shared(rest, visit),)*
                 _ => ::core::result::Result::Err(::scry::__private::no_member(type_name, segment)),
             },
         });

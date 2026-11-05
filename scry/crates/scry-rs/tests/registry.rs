@@ -167,3 +167,89 @@ fn text_commands_return_json_replies() {
     assert_eq!(execute(&registry, "bogus")["error"]["code"], json!("bad_command"));
     assert_eq!(execute(&registry, "roots")["result"][1]["name"], json!("flag"));
 }
+
+#[cfg(feature = "script")]
+mod scripts {
+    use super::*;
+
+    fn eval(registry: &Registry, source: &str) -> serde_json::Value {
+        execute(registry, &format!("eval {source}"))
+    }
+
+    #[test]
+    fn scripts_navigate_and_compute() {
+        let (registry, _) = registry();
+        assert_eq!(eval(&registry, "state.items[0].qty * 2 + state.counter")["result"], json!(47));
+        assert_eq!(eval(&registry, "state.items.len()")["result"], json!(2));
+        assert_eq!(eval(&registry, "state.items[1].mode == \"Idle\"")["result"], json!(true));
+        assert_eq!(eval(&registry, "state.items[0].mode.job")["result"], json!(5));
+        assert_eq!(eval(&registry, "state.maybe == ()")["result"], json!(true));
+        assert_eq!(eval(&registry, "state.items[0].type_name()")["result"], json!("registry::Item"));
+        assert_eq!(eval(&registry, "root(\"state\").pair[1]")["result"], json!("one"));
+        let names = "let n = []; for item in state.items { n.push(item.name) } n";
+        assert_eq!(eval(&registry, names)["result"], json!(["hammer", "bolt"]));
+    }
+
+    #[test]
+    fn a_node_result_is_a_snapshot() {
+        let (registry, _) = registry();
+        assert_eq!(eval(&registry, "state.items[1]")["result"]["name"], json!("bolt"));
+        assert_eq!(eval(&registry, "state.items[1].get()")["result"]["qty"], json!(100));
+    }
+
+    #[test]
+    fn scripts_write_through_the_registry_rules() {
+        let (registry, state) = registry();
+        let reply = eval(&registry, "state.items[0].qty += 1; state.counter = 0; flag = true; state.items[0].qty");
+        assert_eq!(reply, json!({ "ok": true, "result": 4 }));
+        assert_eq!(*state.counter.lock().unwrap(), 0);
+        assert!(STATIC_FLAG.load(Ordering::SeqCst));
+
+        eval(&registry, "let item = state.items[1]; item.name = \"nut\"; item.mode = \"Idle\"");
+        assert_eq!(state.items.read().unwrap()[1].name, "nut");
+
+        assert_eq!(eval(&registry, "state.plain = 1")["error"]["code"], json!("not_writable"));
+        assert_eq!(state.plain, 7);
+    }
+
+    #[test]
+    fn failures_keep_their_codes_and_prints_are_returned() {
+        let (registry, _) = registry();
+        let reply = eval(&registry, "print(\"before\"); state.missing");
+        assert_eq!(reply["error"]["code"], json!("no_such_member"));
+        assert_eq!(reply["output"], json!(["before"]));
+        assert_eq!(eval(&registry, "let x = ;")["error"]["code"], json!("script_error"));
+        assert_eq!(eval(&registry, "import \"x\" as y; 1")["error"]["code"], json!("script_error"));
+    }
+
+    #[test]
+    fn long_sequences_are_counted_and_iterated_in_full() {
+        let (registry, state) = registry();
+        state.items.write().unwrap()[0].tags = (0..250).map(|n| n.to_string()).collect();
+        assert_eq!(eval(&registry, "state.items[0].tags.len()")["result"], json!(250));
+        assert_eq!(eval(&registry, "let n = 0; for tag in state.items[0].tags { n += 1 } n")["result"], json!(250));
+    }
+
+    #[test]
+    fn a_runaway_script_is_stopped() {
+        let (registry, _) = registry();
+        assert_eq!(eval(&registry, "loop {}")["error"]["code"], json!("script_limit"));
+    }
+}
+
+#[cfg(feature = "script")]
+#[test]
+fn a_root_without_members_is_a_plain_variable_written_back_at_the_end() {
+    let (mut registry, state) = registry();
+    let level = Arc::new(Mutex::new(1u32));
+    registry.add("level", Arc::clone(&level));
+    assert_eq!(execute(&registry, "eval if level == 1 { level = level + 1; } level")["result"], json!(2));
+    assert_eq!(*level.lock().unwrap(), 2);
+    assert_eq!(execute(&registry, "eval let level = 9; level")["result"], json!(9));
+    assert_eq!(*level.lock().unwrap(), 2, "a shadowing `let` is not written back");
+    assert_eq!(execute(&registry, "eval level = 7; state.missing")["error"]["code"], json!("no_such_member"));
+    assert_eq!(*level.lock().unwrap(), 2, "nothing is written back after an error");
+    assert_eq!(execute(&registry, "eval level = \"x\"")["error"]["code"], json!("type_mismatch"));
+    assert_eq!(execute(&registry, "eval state.counter = 3; state.counter")["result"], json!(3));
+    assert_eq!(*state.counter.lock().unwrap(), 3);
+}

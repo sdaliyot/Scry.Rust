@@ -263,6 +263,10 @@ impl<T: Reflect> Reflect for Option<T> {
         self.as_ref().map(Reflect::members).unwrap_or_default()
     }
 
+    fn member_count(&self) -> usize {
+        self.as_ref().map_or(0, Reflect::member_count)
+    }
+
     fn snapshot(&self, depth: usize) -> Value {
         self.as_ref().map_or(Value::Null, |value| value.snapshot(depth))
     }
@@ -370,6 +374,10 @@ impl<T: Reflect> Reflect for Vec<T> {
         sequence_members(self)
     }
 
+    fn member_count(&self) -> usize {
+        <[_]>::len(self)
+    }
+
     fn snapshot(&self, depth: usize) -> Value {
         sequence_snapshot(self, self.type_name(), depth)
     }
@@ -402,6 +410,10 @@ impl<T: Reflect, const N: usize> Reflect for [T; N] {
 
     fn members(&self) -> Vec<Member> {
         sequence_members(self)
+    }
+
+    fn member_count(&self) -> usize {
+        <[_]>::len(self)
     }
 
     fn snapshot(&self, depth: usize) -> Value {
@@ -494,6 +506,10 @@ macro_rules! map_impl {
                 self.keys().take(MAX_ELEMENTS).map(|key| Member::new(key.to_string(), type_name::<V>())).collect()
             }
 
+            fn member_count(&self) -> usize {
+                $map::len(self)
+            }
+
             fn snapshot(&self, depth: usize) -> Value {
                 if depth == 0 {
                     return truncated(self.type_name());
@@ -558,6 +574,10 @@ impl<T: Reflect + ?Sized> Reflect for Box<T> {
         (**self).members()
     }
 
+    fn member_count(&self) -> usize {
+        (**self).member_count()
+    }
+
     fn snapshot(&self, depth: usize) -> Value {
         (**self).snapshot(depth)
     }
@@ -592,6 +612,10 @@ impl<T: Reflect + ?Sized> Reflect for Arc<T> {
 
     fn members(&self) -> Vec<Member> {
         (**self).members()
+    }
+
+    fn member_count(&self) -> usize {
+        (**self).member_count()
     }
 
     fn snapshot(&self, depth: usize) -> Value {
@@ -629,6 +653,10 @@ impl<T: Reflect + ?Sized> Reflect for &T {
         (**self).members()
     }
 
+    fn member_count(&self) -> usize {
+        (**self).member_count()
+    }
+
     fn snapshot(&self, depth: usize) -> Value {
         (**self).snapshot(depth)
     }
@@ -662,6 +690,10 @@ impl<T: Reflect + ?Sized> Reflect for &mut T {
 
     fn members(&self) -> Vec<Member> {
         (**self).members()
+    }
+
+    fn member_count(&self) -> usize {
+        (**self).member_count()
     }
 
     fn snapshot(&self, depth: usize) -> Value {
@@ -700,6 +732,10 @@ impl<T: Reflect, F: FnOnce() -> T> Reflect for LazyLock<T, F> {
         LazyLock::force(self).members()
     }
 
+    fn member_count(&self) -> usize {
+        LazyLock::force(self).member_count()
+    }
+
     fn snapshot(&self, depth: usize) -> Value {
         LazyLock::force(self).snapshot(depth)
     }
@@ -732,6 +768,10 @@ impl<T: Reflect> Reflect for OnceLock<T> {
 
     fn members(&self) -> Vec<Member> {
         self.get().map(Reflect::members).unwrap_or_default()
+    }
+
+    fn member_count(&self) -> usize {
+        self.get().map_or(0, Reflect::member_count)
     }
 
     fn snapshot(&self, depth: usize) -> Value {
@@ -786,6 +826,10 @@ impl<T: Reflect + ?Sized> Reflect for Mutex<T> {
         acquire(self.type_name(), || self.try_lock()).map(|guard| guard.members()).unwrap_or_default()
     }
 
+    fn member_count(&self) -> usize {
+        acquire(self.type_name(), || self.try_lock()).map_or(0, |guard| guard.member_count())
+    }
+
     fn snapshot(&self, depth: usize) -> Value {
         match acquire(self.type_name(), || self.try_lock()) {
             Ok(guard) => guard.snapshot(depth),
@@ -822,6 +866,10 @@ impl<T: Reflect + ?Sized> Reflect for RwLock<T> {
 
     fn members(&self) -> Vec<Member> {
         acquire(self.type_name(), || self.try_read()).map(|guard| guard.members()).unwrap_or_default()
+    }
+
+    fn member_count(&self) -> usize {
+        acquire(self.type_name(), || self.try_read()).map_or(0, |guard| guard.member_count())
     }
 
     fn snapshot(&self, depth: usize) -> Value {

@@ -24,6 +24,10 @@ impl<T: Reflect + 'static> Reflect for Signal<T> {
         self.try_read().map(|value| value.members()).unwrap_or_default()
     }
 
+    fn member_count(&self) -> usize {
+        self.try_read().map_or(0, |value| value.member_count())
+    }
+
     fn snapshot(&self, depth: usize) -> Value {
         match self.try_read() {
             Ok(value) => value.snapshot(depth),
@@ -66,6 +70,10 @@ impl<T: Reflect + PartialEq + 'static> Reflect for Memo<T> {
         self.try_read().map(|value| value.members()).unwrap_or_default()
     }
 
+    fn member_count(&self) -> usize {
+        self.try_read().map_or(0, |value| value.member_count())
+    }
+
     fn snapshot(&self, depth: usize) -> Value {
         match self.try_read() {
             Ok(value) => value.snapshot(depth),
@@ -98,6 +106,10 @@ impl<T: Reflect + 'static> Reflect for GlobalSignal<T> {
 
     fn members(&self) -> Vec<Member> {
         self.signal().members()
+    }
+
+    fn member_count(&self) -> usize {
+        self.signal().member_count()
     }
 
     fn snapshot(&self, depth: usize) -> Value {
