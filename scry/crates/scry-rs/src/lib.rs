@@ -46,7 +46,7 @@ pub mod __private;
 pub use command::execute;
 pub use error::Error;
 pub use path::Segment;
-pub use reflect::{Kind, Member, Reflect, Visit, VisitMut};
+pub use reflect::{Kind, Member, Reflect, Visit, VisitMut, short_type_name};
 pub use registry::Registry;
 pub use scry_rs_derive::Reflect;
 pub use serde_json::Value;

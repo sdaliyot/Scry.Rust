@@ -4,6 +4,7 @@ use serde_json::{Map, Value, json};
 
 use crate::__private::FieldRef;
 use crate::path::parse;
+use crate::reflect::short_type_name;
 use crate::{Error, Member, Reflect, Segment, Visit, VisitMut};
 
 /// Named roots that paths start from.
@@ -157,11 +158,12 @@ impl Registry {
             let members: Vec<Value> = value
                 .members()
                 .into_iter()
-                .map(|member| json!({ "name": member.name, "type": member.type_name }))
+                .map(|member| json!({ "name": member.name, "type": short_type_name(member.type_name) }))
                 .collect();
             let mut object = Map::new();
             object.insert("path".into(), Value::String(path.trim().to_owned()));
-            object.insert("type".into(), Value::String(value.type_name().to_owned()));
+            object.insert("type".into(), Value::String(short_type_name(value.type_name())));
+            object.insert("fullType".into(), Value::String(value.type_name().to_owned()));
             object.insert("kind".into(), Value::String(value.kind().as_str().to_owned()));
             object.insert("members".into(), Value::Array(members));
             let methods = crate::call::methods_of(value);

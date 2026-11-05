@@ -900,16 +900,58 @@ impl<T: Reflect> Reflect for OnceLock<T> {
 
 // --- Locks -------------------------------------------------------------------------------------
 
-fn acquire<G>(type_name: &'static str, mut attempt: impl FnMut() -> TryLockResult<G>) -> Result<G, Error> {
+/// Locks for the registry, waiting at most [`LOCK_TIMEOUT`] for the app to let go.
+fn acquire<'a, G>(
+    type_name: &'static str,
+    mut attempt: impl FnMut() -> TryLockResult<G>,
+    clear_poison: &'a dyn Fn(),
+) -> Result<Held<'a, G>, Error> {
     let deadline = Instant::now() + LOCK_TIMEOUT;
     loop {
         match attempt() {
-            Ok(guard) => return Ok(guard),
+            Ok(guard) => return Ok(Held { guard: Some(guard), clear_poison: Some(clear_poison) }),
             // A poisoned lock still guards a value worth looking at: the state a panic left
-            // behind is exactly what a debugging tool should be able to show.
-            Err(TryLockError::Poisoned(poisoned)) => return Ok(poisoned.into_inner()),
+            // behind is exactly what a debugging tool should be able to show. It stays poisoned.
+            Err(TryLockError::Poisoned(poisoned)) => {
+                return Ok(Held { guard: Some(poisoned.into_inner()), clear_poison: None });
+            }
             Err(TryLockError::WouldBlock) if Instant::now() < deadline => thread::sleep(Duration::from_millis(1)),
             Err(TryLockError::WouldBlock) => return Err(Error::LockBusy { type_name }),
+        }
+    }
+}
+
+/// A guard the registry holds on one of the app's locks. If a panic unwinds through it - a
+/// `Debug` impl, a called method - releasing the guard poisons the lock, and every later
+/// `.lock().unwrap()` in the app would panic too. So it clears the poison it caused; the panic
+/// itself is caught by `execute`.
+struct Held<'a, G> {
+    guard: Option<G>,
+    /// `None` when the lock was poisoned before the registry took it.
+    clear_poison: Option<&'a dyn Fn()>,
+}
+
+impl<G> std::ops::Deref for Held<'_, G> {
+    type Target = G;
+
+    fn deref(&self) -> &G {
+        self.guard.as_ref().expect("held until dropped")
+    }
+}
+
+impl<G> std::ops::DerefMut for Held<'_, G> {
+    fn deref_mut(&mut self) -> &mut G {
+        self.guard.as_mut().expect("held until dropped")
+    }
+}
+
+impl<G> Drop for Held<'_, G> {
+    fn drop(&mut self) {
+        drop(self.guard.take());
+        if thread::panicking()
+            && let Some(clear_poison) = self.clear_poison
+        {
+            clear_poison();
         }
     }
 }
@@ -922,26 +964,29 @@ impl<T: Reflect + ?Sized> Reflect for Mutex<T> {
     }
 
     fn kind(&self) -> Kind {
-        acquire(self.type_name(), || self.try_lock()).map_or(Kind::Opaque, |guard| guard.kind())
+        acquire(self.type_name(), || self.try_lock(), &|| self.clear_poison())
+            .map_or(Kind::Opaque, |guard| guard.kind())
     }
 
     fn members(&self) -> Vec<Member> {
-        acquire(self.type_name(), || self.try_lock()).map(|guard| guard.members()).unwrap_or_default()
+        acquire(self.type_name(), || self.try_lock(), &|| self.clear_poison())
+            .map(|guard| guard.members())
+            .unwrap_or_default()
     }
 
     fn member_count(&self) -> usize {
-        acquire(self.type_name(), || self.try_lock()).map_or(0, |guard| guard.member_count())
+        acquire(self.type_name(), || self.try_lock(), &|| self.clear_poison()).map_or(0, |guard| guard.member_count())
     }
 
     fn snapshot(&self, depth: usize) -> Value {
-        match acquire(self.type_name(), || self.try_lock()) {
+        match acquire(self.type_name(), || self.try_lock(), &|| self.clear_poison()) {
             Ok(guard) => guard.snapshot(depth),
             Err(_) => Value::String(format!("<locked: {}>", self.type_name())),
         }
     }
 
     fn read(&self, path: &[Segment], visit: Visit<'_>) -> Result<(), Error> {
-        acquire(self.type_name(), || self.try_lock())?.read(path, visit)
+        acquire(self.type_name(), || self.try_lock(), &|| self.clear_poison())?.read(path, visit)
     }
 
     fn write(&mut self, path: &[Segment], visit: VisitMut<'_>) -> Result<(), Error> {
@@ -949,7 +994,7 @@ impl<T: Reflect + ?Sized> Reflect for Mutex<T> {
     }
 
     fn write_shared(&self, path: &[Segment], visit: VisitMut<'_>) -> Result<(), Error> {
-        acquire(self.type_name(), || self.try_lock())?.write(path, visit)
+        acquire(self.type_name(), || self.try_lock(), &|| self.clear_poison())?.write(path, visit)
     }
 
     fn assign(&mut self, value: &Value) -> Result<(), Error> {
@@ -964,26 +1009,29 @@ impl<T: Reflect + ?Sized> Reflect for RwLock<T> {
     }
 
     fn kind(&self) -> Kind {
-        acquire(self.type_name(), || self.try_read()).map_or(Kind::Opaque, |guard| guard.kind())
+        acquire(self.type_name(), || self.try_read(), &|| self.clear_poison())
+            .map_or(Kind::Opaque, |guard| guard.kind())
     }
 
     fn members(&self) -> Vec<Member> {
-        acquire(self.type_name(), || self.try_read()).map(|guard| guard.members()).unwrap_or_default()
+        acquire(self.type_name(), || self.try_read(), &|| self.clear_poison())
+            .map(|guard| guard.members())
+            .unwrap_or_default()
     }
 
     fn member_count(&self) -> usize {
-        acquire(self.type_name(), || self.try_read()).map_or(0, |guard| guard.member_count())
+        acquire(self.type_name(), || self.try_read(), &|| self.clear_poison()).map_or(0, |guard| guard.member_count())
     }
 
     fn snapshot(&self, depth: usize) -> Value {
-        match acquire(self.type_name(), || self.try_read()) {
+        match acquire(self.type_name(), || self.try_read(), &|| self.clear_poison()) {
             Ok(guard) => guard.snapshot(depth),
             Err(_) => Value::String(format!("<locked: {}>", self.type_name())),
         }
     }
 
     fn read(&self, path: &[Segment], visit: Visit<'_>) -> Result<(), Error> {
-        acquire(self.type_name(), || self.try_read())?.read(path, visit)
+        acquire(self.type_name(), || self.try_read(), &|| self.clear_poison())?.read(path, visit)
     }
 
     fn write(&mut self, path: &[Segment], visit: VisitMut<'_>) -> Result<(), Error> {
@@ -991,7 +1039,7 @@ impl<T: Reflect + ?Sized> Reflect for RwLock<T> {
     }
 
     fn write_shared(&self, path: &[Segment], visit: VisitMut<'_>) -> Result<(), Error> {
-        acquire(self.type_name(), || self.try_write())?.write(path, visit)
+        acquire(self.type_name(), || self.try_write(), &|| self.clear_poison())?.write(path, visit)
     }
 
     fn assign(&mut self, value: &Value) -> Result<(), Error> {

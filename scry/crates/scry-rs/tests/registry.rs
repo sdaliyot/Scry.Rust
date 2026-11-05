@@ -184,7 +184,7 @@ mod scripts {
         assert_eq!(eval(&registry, "state.items[1].mode == \"Idle\"")["result"], json!(true));
         assert_eq!(eval(&registry, "state.items[0].mode.job")["result"], json!(5));
         assert_eq!(eval(&registry, "state.maybe == ()")["result"], json!(true));
-        assert_eq!(eval(&registry, "state.items[0].type_name()")["result"], json!("registry::Item"));
+        assert_eq!(eval(&registry, "state.items[0].type_name()")["result"], json!("Item"));
         assert_eq!(eval(&registry, "root(\"state\").pair[1]")["result"], json!("one"));
         let names = "let n = []; for item in state.items { n.push(item.name) } n";
         assert_eq!(eval(&registry, names)["result"], json!(["hammer", "bolt"]));
@@ -252,4 +252,52 @@ fn a_root_without_members_is_a_plain_variable_written_back_at_the_end() {
     assert_eq!(execute(&registry, "eval level = \"x\"")["error"]["code"], json!("type_mismatch"));
     assert_eq!(execute(&registry, "eval state.counter = 3; state.counter")["result"], json!(3));
     assert_eq!(*state.counter.lock().unwrap(), 3);
+}
+
+/// A value whose snapshot panics, as a buggy `Debug` impl might.
+struct Bomb;
+
+impl Reflect for Bomb {
+    fn type_name(&self) -> &'static str {
+        "Bomb"
+    }
+
+    fn kind(&self) -> scry::Kind {
+        scry::Kind::Scalar
+    }
+
+    fn snapshot(&self, _depth: usize) -> serde_json::Value {
+        panic!("bomb went off")
+    }
+
+    fn read(&self, _path: &[scry::Segment], visit: scry::Visit<'_>) -> Result<(), scry::Error> {
+        visit(self)
+    }
+
+    fn write(&mut self, _path: &[scry::Segment], visit: scry::VisitMut<'_>) -> Result<(), scry::Error> {
+        visit(self)
+    }
+}
+
+#[test]
+fn a_panic_is_an_error_and_leaves_the_apps_lock_usable() {
+    let bomb = Arc::new(Mutex::new(Bomb));
+    let mut registry = Registry::new();
+    registry.add("bomb", Arc::clone(&bomb)).add("count", Arc::new(Mutex::new(5u8)));
+    let reply = execute(&registry, "get bomb");
+    assert_eq!(reply["error"]["code"], json!("panicked"), "{reply}");
+    assert!(reply["error"]["message"].as_str().unwrap().contains("bomb went off"));
+    assert!(!bomb.is_poisoned(), "the registry's guard must not poison the app's lock");
+    assert_eq!(execute(&registry, "get count")["result"], json!(5));
+}
+
+#[cfg(feature = "dioxus")]
+#[test]
+fn a_global_signal_outside_the_runtime_is_an_error_not_a_panic() {
+    use dioxus_signals::{GlobalSignal, Signal};
+    static GLOBAL: GlobalSignal<u8> = Signal::global(|| 1);
+    let mut registry = Registry::new();
+    registry.add_static("global", &GLOBAL);
+    assert_eq!(execute(&registry, "get global")["error"]["code"], json!("no_runtime"));
+    assert_eq!(execute(&registry, "set global 2")["error"]["code"], json!("no_runtime"));
 }

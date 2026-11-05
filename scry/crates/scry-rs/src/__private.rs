@@ -357,7 +357,7 @@ impl Reflect for OpaqueValue {
 }
 
 pub fn truncated(type_name: &str) -> Value {
-    Value::String(format!("<{type_name}>"))
+    Value::String(format!("<{}>", crate::reflect::short_type_name(type_name)))
 }
 
 pub fn no_member(type_name: &'static str, segment: &Segment) -> Error {

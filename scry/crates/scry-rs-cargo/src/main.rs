@@ -16,6 +16,10 @@
 //!
 //! Builds go to `target/scry`, so switching between `cargo build` and `cargo scry build` does not
 //! rebuild the dependencies each time.
+//!
+//! `cargo scry clippy [args] [-- lint args]` lints the rewritten code. Clippy normally takes the
+//! same wrapper slot, so `cargo scry` runs `cargo check` itself and the wrapper hands each
+//! compilation on to `clippy-driver`, the way `cargo clippy` would.
 
 mod edits;
 mod functions;
@@ -62,10 +66,11 @@ fn main() -> ExitCode {
 const USAGE: &str = "\
 cargo scry <cargo command> [args]
 
-Runs the cargo command (build, run, test, check, ...) with --features scry, generating a Scry.Rust
-registry for every workspace crate that has a `scry` feature and depends on `scry`.
+Runs the cargo command (build, run, test, check, clippy, ...) with --features scry, generating a
+Scry.Rust registry for every workspace crate that has a `scry` feature and depends on `scry`.
 
-Example: cargo scry run -p console-demo";
+Examples: cargo scry run -p console-demo
+          cargo scry clippy -p console-demo -- -D warnings";
 
 fn subcommand(args: Vec<OsString>) -> ExitCode {
     let Some((command, rest)) = args.split_first() else {
@@ -86,7 +91,18 @@ fn subcommand(args: Vec<OsString>) -> ExitCode {
     let cargo = env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
 
     let mut cmd = Command::new(&cargo);
-    cmd.arg(command).arg("--features").arg("scry").args(rest);
+    if command == "clippy" {
+        // Lint arguments come after `--`; cargo-clippy passes them to clippy-driver this way.
+        let split = rest.iter().position(|arg| arg == "--").unwrap_or(rest.len());
+        let lint_args: String = rest[(split + 1).min(rest.len())..]
+            .iter()
+            .map(|arg| format!("{}__CLIPPY_HACKERY__", arg.to_string_lossy()))
+            .collect();
+        cmd.arg("check").arg("--features").arg("scry").args(&rest[..split]);
+        cmd.env(wrapper::NEXT_WRAPPER, "clippy-driver").env("CLIPPY_ARGS", lint_args);
+    } else {
+        cmd.arg(command).arg("--features").arg("scry").args(rest);
+    }
     cmd.env("RUSTC_WORKSPACE_WRAPPER", &exe).env(wrapper::GENERATOR_ID, generator_id());
     if env::var_os("CARGO_TARGET_DIR").is_none()
         && !rest.iter().any(|arg| arg.to_string_lossy().starts_with("--target-dir"))

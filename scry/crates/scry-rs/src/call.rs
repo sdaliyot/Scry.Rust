@@ -161,12 +161,7 @@ fn invoke(function: &Function, this: This<'_>, args: &[Value], depth: usize) -> 
         });
     }
     catch_unwind(AssertUnwindSafe(|| (function.invoke)(this, args, depth))).unwrap_or_else(|panic| {
-        let message = panic
-            .downcast_ref::<&str>()
-            .map(|message| message.to_string())
-            .or_else(|| panic.downcast_ref::<String>().cloned())
-            .unwrap_or_else(|| "a non-text panic payload".into());
-        Err(Error::Panicked(format!("{}: {message}", function.path)))
+        Err(Error::Panicked(format!("in {}: {}", function.path, crate::error::panic_message(&*panic))))
     })
 }
 

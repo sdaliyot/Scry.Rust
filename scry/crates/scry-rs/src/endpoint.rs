@@ -58,6 +58,9 @@ pub fn listen(dispatch: impl Fn(Job) -> bool + Send + Sync + 'static) -> io::Res
     let token = new_token()?;
     write_descriptor(port, &token)?;
     eprintln!("scry: listening on 127.0.0.1:{port} (pid {})", std::process::id());
+    if cfg!(panic = "abort") {
+        eprintln!("scry: this build aborts on panic, so a command that panics ends the process");
+    }
 
     let dispatch = std::sync::Arc::new(dispatch);
     thread::Builder::new().name("scry-endpoint".into()).spawn(move || {

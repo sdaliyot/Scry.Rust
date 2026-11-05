@@ -35,6 +35,34 @@ impl Kind {
     }
 }
 
+/// A type name without its module paths, for display: `Vec<Item>` for
+/// `alloc::vec::Vec<console_demo::inventory::Item>`, `dyn PriceRule + Send` for
+/// `dyn console_demo::pricing::PriceRule + Send`. Two types can share a short name, so anything
+/// that needs to tell them apart keeps the full one.
+pub fn short_type_name(full: &str) -> String {
+    let mut out = String::with_capacity(full.len());
+    let mut segment = String::new();
+    let mut chars = full.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c.is_alphanumeric() || c == '_' {
+            segment.push(c);
+        } else if c == ':' && chars.peek() == Some(&':') {
+            chars.next();
+            // A path segment: drop it, keeping only what follows the last `::`.
+            if segment.is_empty() {
+                out.push_str("::");
+            }
+            segment.clear();
+        } else {
+            out.push_str(&segment);
+            segment.clear();
+            out.push(c);
+        }
+    }
+    out.push_str(&segment);
+    out
+}
+
 /// A navigable child: a field name or index, and the type declared for it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Member {
@@ -100,5 +128,22 @@ pub trait Reflect {
     fn assign(&mut self, value: &Value) -> Result<(), Error> {
         let _ = value;
         Err(Error::not_writable(format!("{} cannot be assigned from JSON", self.type_name())))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::short_type_name;
+
+    #[test]
+    fn short_type_names_drop_module_paths() {
+        assert_eq!(short_type_name("alloc::vec::Vec<console_demo::inventory::Item>"), "Vec<Item>");
+        assert_eq!(
+            short_type_name("std::sync::Mutex<alloc::boxed::Box<dyn app::Rule + core::marker::Send>>"),
+            "Mutex<Box<dyn Rule + Send>>"
+        );
+        assert_eq!(short_type_name("(u32, &str, [u8; 4])"), "(u32, &str, [u8; 4])");
+        assert_eq!(short_type_name("<app::A as app::T>::Out"), "<A as T>::Out");
+        assert_eq!(short_type_name("app::f::{{closure}}"), "{{closure}}");
     }
 }

@@ -21,6 +21,10 @@ use crate::rewrite::{Options, Paths, normalize, rewrite_crate};
 /// each rewritten crate, so cargo rebuilds it when the generator changes.
 pub const GENERATOR_ID: &str = "SCRY_GENERATOR_ID";
 
+/// A wrapper to run rustc through after this one, as `<wrapper> <rustc> <args>`: `clippy-driver`
+/// for `cargo scry clippy`.
+pub const NEXT_WRAPPER: &str = "SCRY_NEXT_WRAPPER";
+
 /// rustc options whose value is the next argument, so it is not taken for the source file.
 const TAKES_VALUE: &[&str] = &[
     "--crate-name",
@@ -178,8 +182,9 @@ fn rewritten(rustc: &OsString, invocation: &Invocation) -> Result<Rewritten, Str
 }
 
 /// Compiles the original sources once more, to MIR only, for the generic instantiations they use.
-/// The same arguments as the real build, minus its outputs and incremental state, without
-/// optimizations (MIR inlining would hide calls), and with lints and diagnostics silenced.
+/// The same arguments as the real build, minus its outputs, without optimizations (MIR inlining
+/// would hide calls), and with lints and diagnostics silenced. It keeps an incremental cache of its
+/// own next to the dump, so after a small edit rustc redoes only what the edit touched.
 fn mir_dump(rustc: &OsString, invocation: &Invocation, path: &Path) -> Result<String, String> {
     let mut args = Vec::new();
     let mut index = 0;
@@ -203,6 +208,7 @@ fn mir_dump(rustc: &OsString, invocation: &Invocation, path: &Path) -> Result<St
         index += 1;
     }
     args.push(format!("--emit=mir={}", path.display()));
+    args.push(format!("-Cincremental={}", path.with_extension("incremental").display()));
     args.extend(["-C".into(), "opt-level=0".into(), "--cap-lints=allow".into()]);
     let output = Command::new(rustc).args(&args).output().map_err(|error| error.to_string())?;
     if !output.status.success() {
@@ -214,7 +220,15 @@ fn mir_dump(rustc: &OsString, invocation: &Invocation, path: &Path) -> Result<St
 }
 
 fn exec(rustc: &OsString, args: &[String]) -> u8 {
-    match Command::new(rustc).args(args).status() {
+    let mut command = match env::var_os(NEXT_WRAPPER) {
+        Some(next) => {
+            let mut command = Command::new(next);
+            command.arg(rustc);
+            command
+        }
+        None => Command::new(rustc),
+    };
+    match command.args(args).status() {
         Ok(status) => status.code().unwrap_or(1).clamp(0, 255) as u8,
         Err(error) => {
             eprintln!("error: scry: could not run {}: {error}", rustc.to_string_lossy());

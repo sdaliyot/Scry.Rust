@@ -586,11 +586,11 @@ const TRAIT_METHODS: &str = " #[doc(hidden)] #[allow(dead_code)] \
     fn __scry_mut(&mut self) -> ::scry::__private::FieldMut<'_> { \
     ::scry::__private::FieldMut::Other(::core::any::type_name::<Self>()) } ";
 
-const IMPL_METHODS: &str = " #[allow(clippy::all)] \
+const IMPL_METHODS: &str = " #[allow(clippy::all, clippy::pedantic, clippy::nursery, clippy::restriction)] \
     fn __scry_ref(&self) -> ::scry::__private::FieldRef<'_> { \
     #[allow(unused_imports)] use ::scry::__private::{ViaDebug as _, ViaOpaque as _, ViaReflect as _}; \
     (&&&::scry::__private::Probe(self)).scry_ref() } \
-    #[allow(clippy::all)] \
+    #[allow(clippy::all, clippy::pedantic, clippy::nursery, clippy::restriction)] \
     fn __scry_mut(&mut self) -> ::scry::__private::FieldMut<'_> { \
     #[allow(unused_imports)] use ::scry::__private::{ViaOtherMut as _, ViaReflectMut as _}; \
     (&&&::scry::__private::ProbeMut::new(self)).scry_mut() } ";
@@ -598,7 +598,7 @@ const IMPL_METHODS: &str = " #[allow(clippy::all)] \
 fn static_registration(name: &str, path: &str) -> String {
     format!(
         " #[::scry::__private::linkme::distributed_slice(::scry::__private::STATICS)] \
-         #[linkme(crate = ::scry::__private::linkme)] #[doc(hidden)] #[allow(non_upper_case_globals)] \
+         #[linkme(crate = ::scry::__private::linkme)] #[doc(hidden)] #[allow(non_upper_case_globals, clippy::all, clippy::pedantic, clippy::nursery, clippy::restriction)] \
          static __SCRY_STATIC_{name}: ::scry::__private::StaticEntry = {{ \
          fn __scry_register(registry: &mut ::scry::Registry) {{ \
          #[allow(unused_imports)] use ::scry::__private::{{ViaDebug as _, ViaOpaque as _, ViaReflect as _}}; \
@@ -1033,7 +1033,7 @@ mod tests {
         );
         let rule_impls = out.matches("reflect_dyn !").count();
         assert_eq!(rule_impls, 8, "Rule and Sub, four variants each:\n{out}");
-        assert!(out.contains("impl Rule for u8 { #[allow(clippy::all)] fn __scry_ref"));
+        assert!(out.contains("impl Rule for u8 { #[allow(clippy::all, clippy::pedantic, clippy::nursery, clippy::restriction)] fn __scry_ref"));
         assert!(!out.contains("impl Cloner for u8 { #[allow"));
         assert!(report.contains("trait Cloner: skipped, method dup returns Self"));
         assert!(report.contains("impl Sub for Box < T >: skipped"));

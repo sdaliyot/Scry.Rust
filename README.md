@@ -29,6 +29,8 @@ scry = { package = "scry-rs", path = "…/scry/crates/scry-rs", optional = true 
 
 A normal `cargo build` is unchanged. `cargo scry build` (or `run`, `test`, …) builds the same code with
 the registry generated in. It writes to `target/scry`, so the normal and Scry builds don't rebuild each other's dependencies.
+`cargo scry clippy [args] [-- lint args]` lints the rewritten code. The generated parts allow every
+lint group, so only the app's own code is reported.
 
 ## Trying it
 
@@ -169,6 +171,16 @@ because Windows redirects `AppData` for processes started from packaged apps suc
 Writes need a `Mutex`, `RwLock`, atomic or signal somewhere on the path. Anything else is refused
 with `not_writable`, because writing through a shared reference is undefined behaviour in Rust.
 
+A panic during a command doesn't take the app down. This covers app code it calls, a `Debug` impl
+it reads through, or a Dioxus global signal read without the runtime (that one is `no_runtime`).
+- The command fails with `panicked`, and the app and the endpoint carry on.
+- A lock Scry held at the time is not left poisoned, so the app's own `.lock().unwrap()` keeps
+  working.
+- Two cases still end the process: a build with `panic = "abort"` (the endpoint warns about this
+  when it starts), and an app panic hook that exits.
+
+Type names are shown short (`Vec<Item>`); `ls` also gives the full one as `fullType`.
+
 ## Known limits
 
 - Plain stack locals can't be reached. Only statics, and state reachable from them or from tracked hooks.
@@ -182,4 +194,3 @@ with `not_writable`, because writing through a shared reference is undefined beh
   that locks a `Mutex` its own path already holds.
 - Only types defined without generic parameters in opted-in crates have callable methods.
 - Script variables don't survive between `eval` calls.
-- `cargo scry clippy` doesn't work, because clippy uses the same wrapper slot.

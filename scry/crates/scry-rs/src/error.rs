@@ -60,8 +60,12 @@ pub enum Error {
     },
     /// The function exists but cannot be called this way.
     NotCallable(String),
-    /// The called function panicked.
+    /// The called function, or code a command ran into, panicked.
     Panicked(String),
+    /// A value that only exists inside the Dioxus runtime was reached from outside it.
+    NoRuntime {
+        type_name: &'static str,
+    },
     /// A script did not parse, or failed while running.
     Script(String),
     /// A script ran past its time or size limits and was stopped.
@@ -89,6 +93,7 @@ impl Error {
             Error::CannotConvert { .. } => "cannot_convert",
             Error::NotCallable(_) => "not_callable",
             Error::Panicked(_) => "panicked",
+            Error::NoRuntime { .. } => "no_runtime",
             Error::Script(_) => "script_error",
             Error::ScriptLimit(_) => "script_limit",
         }
@@ -138,7 +143,10 @@ impl fmt::Display for Error {
                 write!(f, "an argument of type {type_name} cannot be built from JSON")
             }
             Error::NotCallable(message) => write!(f, "not callable: {message}"),
-            Error::Panicked(message) => write!(f, "panicked in {message}"),
+            Error::Panicked(message) => write!(f, "panicked: {message}"),
+            Error::NoRuntime { type_name } => {
+                write!(f, "{type_name} lives in the Dioxus runtime, which is not running on this thread")
+            }
             Error::Script(message) => write!(f, "script error: {message}"),
             Error::ScriptLimit(message) => write!(f, "script stopped: {message}"),
         }
@@ -146,3 +154,12 @@ impl fmt::Display for Error {
 }
 
 impl std::error::Error for Error {}
+
+/// The message a panic was raised with.
+pub(crate) fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    payload
+        .downcast_ref::<&str>()
+        .map(|message| message.to_string())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "a panic without a message".into())
+}

@@ -1,7 +1,7 @@
 //! `Reflect` for Dioxus signals.
 //!
 //! Signals belong to the Dioxus runtime on the UI thread: these impls must be called from there,
-//! and a `GlobalSignal` panics if resolved anywhere else. Writes go through the signal, so the
+//! and a `GlobalSignal` reports `no_runtime` anywhere else. Writes go through the signal, so the
 //! components subscribed to it re-render exactly as if the app had written it.
 
 use std::any::type_name;
@@ -101,35 +101,47 @@ impl<T: Reflect + 'static> Reflect for GlobalSignal<T> {
     }
 
     fn kind(&self) -> Kind {
-        self.signal().kind()
+        resolve(self).map_or(Kind::Opaque, |signal| signal.kind())
     }
 
     fn members(&self) -> Vec<Member> {
-        self.signal().members()
+        resolve(self).map(|signal| signal.members()).unwrap_or_default()
     }
 
     fn member_count(&self) -> usize {
-        self.signal().member_count()
+        resolve(self).map_or(0, |signal| signal.member_count())
     }
 
     fn snapshot(&self, depth: usize) -> Value {
-        self.signal().snapshot(depth)
+        match resolve(self) {
+            Ok(signal) => signal.snapshot(depth),
+            Err(error) => Value::String(format!("<{error}>")),
+        }
     }
 
     fn read(&self, path: &[Segment], visit: Visit<'_>) -> Result<(), Error> {
         // Fully qualified: Dioxus's ReadableExt::read applies to a Signal as well.
-        Reflect::read(&self.signal(), path, visit)
+        Reflect::read(&resolve(self)?, path, visit)
     }
 
     fn write(&mut self, path: &[Segment], visit: VisitMut<'_>) -> Result<(), Error> {
-        self.signal().write_shared(path, visit)
+        resolve(self)?.write_shared(path, visit)
     }
 
     fn write_shared(&self, path: &[Segment], visit: VisitMut<'_>) -> Result<(), Error> {
-        self.signal().write_shared(path, visit)
+        resolve(self)?.write_shared(path, visit)
     }
 
     fn assign(&mut self, value: &Value) -> Result<(), Error> {
-        self.signal().assign(value)
+        resolve(self)?.assign(value)
+    }
+}
+
+/// The signal behind a global one. Resolving it needs the Dioxus runtime, and panics without one -
+/// on a thread other than the UI thread, or after the app's window has closed.
+fn resolve<T: 'static>(global: &GlobalSignal<T>) -> Result<Signal<T>, Error> {
+    match dioxus_core::Runtime::try_current() {
+        Some(_) => Ok(global.signal()),
+        None => Err(Error::NoRuntime { type_name: type_name::<GlobalSignal<T>>() }),
     }
 }

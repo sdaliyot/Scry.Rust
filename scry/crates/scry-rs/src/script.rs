@@ -162,7 +162,9 @@ fn engine(registry: &Rc<Registry>, printed: &Rc<RefCell<Vec<String>>>) -> Engine
         node.own_or("len", &[], |node| node.with(|value| (value.member_count() as INT).into()))
     });
     engine.register_fn("type_name", |node: Node| {
-        node.own_or("type_name", &[], |node| node.with(|value| value.type_name().into()))
+        node.own_or("type_name", &[], |node| {
+            node.with(|value| crate::reflect::short_type_name(value.type_name()).into())
+        })
     });
     engine.register_fn("kind", |node: Node| {
         node.own_or("kind", &[], |node| node.with(|value| value.kind().as_str().into()))
@@ -362,7 +364,7 @@ impl Node {
 impl std::fmt::Display for Node {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self.with(|value| value.type_name()) {
-            Ok(type_name) => write!(f, "{}: {type_name}", self.path()),
+            Ok(type_name) => write!(f, "{}: {}", self.path(), crate::reflect::short_type_name(type_name)),
             Err(error) => write!(f, "{}: <{error}>", self.path()),
         }
     }

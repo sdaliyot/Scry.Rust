@@ -230,7 +230,7 @@ pub fn shim(source: &Source, attrs: &[Attribute], sig: &Signature, callee: &Call
         #[::scry::__private::linkme::distributed_slice(::scry::__private::FUNCTIONS)]
         #[linkme(crate = ::scry::__private::linkme)]
         #[doc(hidden)]
-        #[allow(non_upper_case_globals, unused_imports, unused_variables, deprecated, clippy::all)]
+        #[allow(non_upper_case_globals, unused_imports, unused_variables, deprecated, clippy::all, clippy::pedantic, clippy::nursery, clippy::restriction)]
         static #unique: ::scry::__private::Function = {
             fn invoke(
                 this: ::scry::__private::This<'_>,

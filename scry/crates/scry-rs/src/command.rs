@@ -1,3 +1,5 @@
+use std::panic::{AssertUnwindSafe, catch_unwind};
+
 use serde_json::{Value, json};
 
 use crate::{Error, Registry};
@@ -7,7 +9,8 @@ pub(crate) const DEFAULT_DEPTH: usize = 3;
 /// How deep a function's result is snapshotted: results are usually small, and often the point.
 pub(crate) const RESULT_DEPTH: usize = 8;
 
-const HELP: &str = "roots | ls <path> | get <path> [depth] | set <path> <json> | call <function or path.method> [json args]                     | fns [filter] | eval <rhai script> | help";
+const HELP: &str = "roots | ls <path> | get <path> [depth] | set <path> <json> 
+                    | call <function or path.method> [json args] | fns [filter] | eval <rhai script> | help";
 
 /// Runs one text command against `registry` and returns a JSON reply:
 /// `{"ok":true,"result":...}` or `{"ok":false,"error":{"code":...,"message":...}}`, plus an
@@ -17,9 +20,16 @@ const HELP: &str = "roots | ls <path> | get <path> [depth] | set <path> <json> |
 /// `call <target> [args]` (see [`Registry::call`]; arguments are JSON values separated by
 /// spaces), `fns [filter]`, and with the `script` feature `eval <rhai script>` (see the `script`
 /// module docs).
+///
+/// A panic anywhere in a command - app code it calls, a `Debug` impl it reads through - is caught
+/// and returned as a `panicked` error, and a lock held at the time is left unpoisoned (see
+/// `impls::Held`), so the app carries on as if nothing happened. Only a build with
+/// `panic = "abort"`, or an app panic hook that exits, still ends the process.
 pub fn execute(registry: &Registry, line: &str) -> Value {
     let mut output = Vec::new();
-    let mut reply = match run(registry, line.trim(), &mut output) {
+    let result = catch_unwind(AssertUnwindSafe(|| run(registry, line.trim(), &mut output)))
+        .unwrap_or_else(|panic| Err(Error::Panicked(crate::error::panic_message(&*panic))));
+    let mut reply = match result {
         Ok(result) => json!({ "ok": true, "result": result }),
         Err(error) => json!({ "ok": false, "error": { "code": error.code(), "message": error.to_string() } }),
     };
@@ -36,7 +46,7 @@ fn run(registry: &Registry, line: &str, output: &mut Vec<String>) -> Result<Valu
             registry
                 .roots()
                 .into_iter()
-                .map(|root| json!({ "name": root.name, "type": root.type_name }))
+                .map(|root| json!({ "name": root.name, "type": crate::reflect::short_type_name(root.type_name) }))
                 .collect::<Vec<_>>()
         )),
         "ls" => registry.describe(required(rest, "a path")?),

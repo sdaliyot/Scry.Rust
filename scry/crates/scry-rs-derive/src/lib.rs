@@ -55,7 +55,7 @@ fn expand(mut input: DeriveInput) -> syn::Result<Tokens> {
         let from_value = construct.map(|construct| {
             quote! {
                 #[automatically_derived]
-                #[allow(unused_variables, unused_imports, unreachable_patterns, clippy::all)]
+                #[allow(unused_variables, unused_imports, unreachable_patterns, clippy::all, clippy::pedantic, clippy::nursery, clippy::restriction)]
                 impl #from_impl ::scry::__private::FromValue for #name #from_type #from_where {
                     fn from_value(value: &::scry::Value) -> ::core::result::Result<Self, ::scry::Error> {
                         use ::scry::__private::{ViaFromValue as _, ViaNoValue as _};
@@ -79,7 +79,7 @@ fn expand(mut input: DeriveInput) -> syn::Result<Tokens> {
     };
     Ok(quote! {
         #[automatically_derived]
-        #[allow(unused_variables, unused_imports, unreachable_patterns, clippy::all)]
+        #[allow(unused_variables, unused_imports, unreachable_patterns, clippy::all, clippy::pedantic, clippy::nursery, clippy::restriction)]
         impl #impl_generics ::scry::Reflect for #name #type_generics #where_clause {
             fn type_name(&self) -> &'static str {
                 ::core::any::type_name::<Self>()
