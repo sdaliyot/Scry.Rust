@@ -75,6 +75,8 @@ pub struct Context<'a> {
     pub crate_name: &'a str,
     /// Hook points are compiled in, with these exclusions; `None` when they are off.
     pub hook_points: Option<&'a Config>,
+    /// Attribute macros the manifest says leave a function as written.
+    pub transparent: &'a [String],
 }
 
 pub struct Generator<'a> {
@@ -288,7 +290,13 @@ impl Generator<'_> {
         let cfgs = functions::cfgs(&item.attrs);
         let params: Vec<String> = item.sig.generics.type_params().map(|param| param.ident.to_string()).collect();
         if params.is_empty() || item.sig.generics.const_params().next().is_some() {
-            match functions::shim(self.source, &item.attrs, &item.sig, &Callee::new(None, None, cfgs)) {
+            match functions::shim(
+                self.source,
+                &item.attrs,
+                &item.sig,
+                &Callee::new(None, None, cfgs),
+                self.cx.transparent,
+            ) {
                 Ok(shim) => {
                     self.edits.insert(self.source.end(item.block.brace_token.span.close()), shim);
                     self.report.generated("fn", &name);
@@ -330,7 +338,7 @@ impl Generator<'_> {
             callee.turbofish = Some(quote!(::<#(#resolved),*>));
             callee.label = Some(label.clone());
             callee.variant = variant;
-            match functions::shim(self.source, &item.attrs, &item.sig, &callee) {
+            match functions::shim(self.source, &item.attrs, &item.sig, &callee, self.cx.transparent) {
                 Ok(shim) => {
                     shims.push_str(&shim);
                     self.report.generated("fn", &label);
@@ -441,8 +449,8 @@ impl Generator<'_> {
             .map(str::to_owned)
             .or_else(|| item.unsafety.map(|_| "it is an unsafe impl".to_owned()))
             .or_else(|| {
-                functions::unknown_attribute(&item.attrs)
-                    .map(|attribute| format!("its #[{attribute}] attribute may rewrite it"))
+                functions::unknown_attribute(&item.attrs, self.cx.transparent)
+                    .map(|attribute| format!("its #[{attribute}] attribute may rewrite it; see transparent-attributes"))
             });
         if let Some(reason) = reason {
             if has_methods {
@@ -538,7 +546,7 @@ impl Generator<'_> {
             callee.subst = subst.clone();
             callee.label = self_label.clone();
             callee.variant = instance.map_or(0, |(_, variant)| variant);
-            match functions::shim(self.source, &method.attrs, &method.sig, &callee) {
+            match functions::shim(self.source, &method.attrs, &method.sig, &callee, self.cx.transparent) {
                 Ok(shim) => {
                     shims.push_str(&shim);
                     self.report.generated("method", &name);
@@ -576,7 +584,8 @@ impl Generator<'_> {
         } else if attrs.iter().any(|attr| attr.path().is_ident("test") || attr.path().is_ident("bench")) {
             Some("it is a test".to_owned())
         } else {
-            functions::unknown_attribute(attrs).map(|attribute| format!("its #[{attribute}] attribute may rewrite it"))
+            functions::unknown_attribute(attrs, self.cx.transparent)
+                .map(|attribute| format!("its #[{attribute}] attribute may rewrite it; see transparent-attributes"))
         };
         if let Some(reason) = reason {
             self.report.skipped("hook point", label, &reason);
@@ -602,11 +611,11 @@ impl Generator<'_> {
             _ => None,
         }
         .unwrap_or_else(|| functions::compact(&item.self_ty));
-        if let Some(attribute) = functions::unknown_attribute(&item.attrs) {
+        if let Some(attribute) = functions::unknown_attribute(&item.attrs, self.cx.transparent) {
             self.report.skipped(
                 "hook point",
                 &format!("impl {self_name}"),
-                &format!("its #[{attribute}] attribute may rewrite it"),
+                &format!("its #[{attribute}] attribute may rewrite it; see transparent-attributes"),
             );
             return;
         }
@@ -1096,6 +1105,7 @@ mod tests {
             uses: &uses,
             crate_name: "app",
             hook_points,
+            transparent: &["my_macro".to_owned()],
         };
         let mut edits = Edits::default();
         Generator::new(&source, &mut edits, &cx, &mut report, true, Vec::new()).visit_file(&syntax);
@@ -1164,8 +1174,12 @@ mod tests {
 #[cfg(windows)] fn only_windows() {}
 fn generic<T>(t: T) {}
 async fn later() {}
-fn takes_mut(v: &mut Vec<u8>) {}
+fn soon() -> impl std::future::Future<Output = u8> { async { 1 } }
+fn takes_mut(v: &mut Vec<u8>, text: &mut str) {}
+fn takes_dyn(v: &mut dyn std::io::Write) {}
 fn takes_impl(v: impl Fn()) {}
+fn takes_into(name: impl Into<String>, path: impl AsRef<std::path::Path>, items: impl IntoIterator<Item = u32>, it: impl Iterator<Item = u8> + Send) {}
+fn takes_copy(v: impl Into<String> + Copy) {}
 #[component] fn card() {}
 fn App() {}
 #[tokio::main] fn wrapped() {}
@@ -1179,6 +1193,10 @@ impl Default for S { fn default() -> Self { S } }
         for callable in [
             "fn add",
             "fn only_windows",
+            "fn takes_mut",
+            "fn takes_into",
+            "fn later",
+            "fn soon",
             "method S::get",
             "method S::bump",
             "method S::new",
@@ -1194,9 +1212,9 @@ impl Default for S { fn default() -> Self { S } }
         }
         for (skipped, reason) in [
             ("fn generic", "never calls it with concrete types"),
-            ("fn later", "it is async"),
-            ("fn takes_mut", "`&mut` argument"),
-            ("fn takes_impl", "`impl Trait` argument"),
+            ("fn takes_dyn", "`&mut dyn Trait`"),
+            ("fn takes_impl", "it takes `impl Fn ()`, which no type is picked for"),
+            ("fn takes_copy", "which no type is picked for"),
             ("fn card", "UI component"),
             ("fn App", "UI component"),
             ("fn wrapped", "#[tokio::main] attribute"),
@@ -1215,6 +1233,27 @@ impl Default for S { fn default() -> Self { S } }
         let add = shim("add");
         assert!(add.contains("probe_arg ! (i64") && add.contains("probe_ref_arg ! (str"), "{add}");
         assert!(add.contains("signature : \"fn add(a: i64, b: &str) -> i64\""), "{add}");
+        assert!(shim("later").contains("block_on (later ())"), "{}", shim("later"));
+        assert!(shim("soon").contains("block_on (soon ())"), "{}", shim("soon"));
+        let takes_into = shim("takes_into");
+        for built in [
+            "probe_arg ! (String",
+            "probe_arg ! (:: std :: path :: PathBuf",
+            "probe_arg ! (:: std :: vec :: Vec < u32 >",
+        ] {
+            assert!(takes_into.contains(built), "{built}: {takes_into}");
+        }
+        assert!(takes_into.contains(":: core :: iter :: IntoIterator :: into_iter (arg3)"), "{takes_into}");
+        let takes_mut = shim("takes_mut");
+        assert!(
+            takes_mut.contains("let mut arg0 : Vec < u8 >")
+                && takes_mut.contains("(& mut arg0 , arg1 . as_mut_str ())"),
+            "{takes_mut}"
+        );
+        assert!(
+            takes_mut.contains("\"args\"") && takes_mut.contains("String :: from (\"text\")"),
+            "the changed values are reported: {takes_mut}"
+        );
         let methods = shim("get");
         assert!(shim("default").contains("< S as Default > :: default"), "{}", shim("default"));
         assert!(methods.contains("probe_ref_arg ! (S ,"), "Self is spelled as the impl type: {methods}");
@@ -1267,6 +1306,26 @@ let _9: Cache<u8, u8>;
         let cache = out.lines().find(|line| line.starts_with("impl<K: Clone, V>")).unwrap();
         assert!(cache.contains("TypeId :: of :: < Cache < u32 , crate :: Item > >"), "{cache}");
         assert!(cache.contains("probe_ref_arg ! (u32"), "K is replaced: {cache}");
+    }
+
+    #[test]
+    fn known_and_listed_attribute_macros_keep_shims_and_hook_points() {
+        let text = "#[tracing::instrument] fn traced(a: u32) -> u32 { a }
+#[cached::proc_macro::cached] fn cached(a: u32) -> u32 { a }
+#[my_macro] fn listed(a: u32) -> u32 { a }
+#[other::rewrite] fn unknown(a: u32) -> u32 { a }
+";
+        let config = Config::default();
+        let (out, report) = rewrite_with(text, false, "", Some(&config));
+        let lines: Vec<&str> = out.lines().collect();
+        for line in &lines[..3] {
+            assert!(line.contains("static __SCRY_HOOK :") && line.contains("__SCRY_FN_"), "{line}\n{report}");
+        }
+        assert!(!lines[3].contains("__SCRY"), "{}", lines[3]);
+        assert!(
+            report.contains("its #[other::rewrite] attribute may rewrite it; see transparent-attributes"),
+            "{report}"
+        );
     }
 
     #[test]

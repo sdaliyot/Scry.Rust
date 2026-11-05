@@ -71,6 +71,7 @@ static JOBS: std::sync::Mutex<Option<UnboundedReceiver<Job>>> = std::sync::Mutex
 /// Starts the endpoint for a Dioxus app. Called at the top of `main`; the registry itself runs on
 /// the UI thread, in the task [`use_endpoint`] starts, because that is where signals live.
 pub fn start_endpoint() {
+    crate::run_async::capture_runtime();
     let (sender, receiver) = futures_channel::mpsc::unbounded::<Job>();
     if let Ok(mut jobs) = JOBS.lock() {
         *jobs = Some(receiver);
@@ -83,6 +84,7 @@ pub fn start_endpoint() {
 /// Runs the registry on the Dioxus runtime. Called at the top of the root component.
 pub fn use_endpoint() {
     use_hook(|| {
+        crate::run_async::capture_runtime();
         let jobs = JOBS.lock().ok().and_then(|mut jobs| jobs.take());
         if let Some(mut jobs) = jobs {
             spawn(async move {

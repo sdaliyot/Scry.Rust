@@ -31,7 +31,7 @@ pub type Job = (String, mpsc::Sender<String>);
 
 /// How long a request waits for the registry's thread before giving up, for when that thread is
 /// busy - a UI thread in a long event handler, say.
-const REPLY_TIMEOUT: Duration = Duration::from_secs(10);
+pub(crate) const REPLY_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The longest request line accepted.
 const MAX_REQUEST: u64 = 1 << 20;
@@ -170,6 +170,7 @@ fn write_descriptor(port: u16, token: &str) -> io::Result<()> {
 /// Starts the endpoint with a registry on its own thread. For apps whose roots are all statics
 /// and thread-safe; a Dioxus app uses `dioxus_hooks::start_endpoint` instead.
 pub fn start() {
+    crate::run_async::capture_runtime();
     let (sender, receiver) = mpsc::channel::<Job>();
     let spawned = thread::Builder::new().name("scry-registry".into()).spawn(move || {
         let registry = crate::Registry::discovered();

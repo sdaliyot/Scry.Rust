@@ -16,6 +16,7 @@ use crate::{Error, Kind, Reflect, Registry, Segment, Visit, VisitMut};
 #[cfg(feature = "dioxus")]
 pub use crate::dioxus_hooks as dioxus;
 pub use crate::endpoint::start as start_endpoint;
+pub use crate::run_async::{block_on, capture_runtime};
 
 /// Maximum length of a `Debug` rendering in a snapshot, so one large opaque value cannot swamp it.
 const MAX_DEBUG_LEN: usize = 1_000;

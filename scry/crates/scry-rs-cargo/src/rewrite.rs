@@ -122,6 +122,7 @@ pub fn rewrite_crate(
         uses: &uses,
         crate_name: &options.crate_name,
         hook_points: (options.hook_points && options.config.hooks).then_some(&options.config),
+        transparent: &options.config.transparent,
     };
 
     let _ = fs::remove_dir_all(paths.mirror_root);

@@ -14,7 +14,7 @@ name = "scry"
 default = ["script", "lock_api"]
 # Locks built on `lock_api`: parking_lot, spin and others.
 lock_api = ["dep:lock_api"]
-# tokio::sync locks. `cargo scry` turns this on for an app that depends on tokio.
+# tokio::sync locks, and the app's runtime for calling async functions. `cargo scry` turns this on for an app that depends on tokio.
 tokio = ["dep:tokio"]
 # The `eval` command: Rhai scripts that navigate, read and write the registry.
 script = ["dep:rhai"]
@@ -32,7 +32,7 @@ getrandom = "0.3"
 # Third-party types are read and written through their `Serialize`/`Deserialize` impls; see `probes`.
 serde = "1"
 lock_api = { version = "0.4", optional = true }
-tokio = { version = "1", optional = true, default-features = false, features = ["sync"] }
+tokio = { version = "1", optional = true, default-features = false, features = ["sync", "rt"] }
 rhai = { version = "1.27", optional = true }
 dioxus-signals = { version = "0.7", optional = true }
 dioxus-core = { version = "0.7", optional = true }
@@ -43,4 +43,4 @@ futures-util = { version = "0.3", optional = true, default-features = false }
 serde_json.workspace = true
 serde = { version = "1", features = ["derive"] }
 parking_lot = "0.12"
-tokio = { version = "1", default-features = false, features = ["sync"] }
+tokio = { version = "1", default-features = false, features = ["sync", "rt", "time"] }

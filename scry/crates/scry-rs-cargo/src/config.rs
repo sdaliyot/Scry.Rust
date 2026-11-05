@@ -8,6 +8,16 @@
 //!
 //! `[workspace.metadata.scry.hooks]` in the workspace's manifest sets the same keys for every crate
 //! in it; a crate's own table overrides each key it sets.
+//!
+//! ```toml
+//! [package.metadata.scry]
+//! transparent-attributes = ["my_retry", "metrics::timed"]
+//! ```
+//!
+//! names attribute macros that leave a function callable as written, so it still gets a call shim
+//! and a hook point (by default a function under an unknown attribute macro gets neither). A name
+//! matches an attribute's last path segment or its whole path. The workspace's list and the
+//! crate's are combined.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -16,13 +26,15 @@ use std::path::{Path, PathBuf};
 pub struct Config {
     pub hooks: bool,
     hook_exclude: Vec<Vec<String>>,
+    /// Attribute macros that leave a function as written; see the module docs.
+    pub transparent: Vec<String>,
     /// The manifests read, which the build has to be redone for when they change.
     pub manifests: Vec<PathBuf>,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Self { hooks: true, hook_exclude: Vec::new(), manifests: Vec::new() }
+        Self { hooks: true, hook_exclude: Vec::new(), transparent: Vec::new(), manifests: Vec::new() }
     }
 }
 
@@ -51,8 +63,24 @@ impl Config {
         }
         let table: toml::Table = text.parse().map_err(|error| format!("{}: {error}", manifest.display()))?;
         let mut value = Some(&table);
+        let mut scry = None;
         for key in keys {
             value = value.and_then(|table| table.get(*key)).and_then(toml::Value::as_table);
+            if *key == "scry" {
+                scry = value;
+            }
+        }
+        if let Some(list) = scry.and_then(|scry| scry.get("transparent-attributes")) {
+            let place = format!("{} [{}]", manifest.display(), keys[..keys.len() - 1].join("."));
+            let names = list
+                .as_array()
+                .and_then(|list| list.iter().map(|name| name.as_str().map(str::to_owned)).collect::<Option<Vec<_>>>())
+                .ok_or_else(|| format!("{place}: `transparent-attributes` must be a list of attribute names"))?;
+            for name in names {
+                if !self.transparent.contains(&name) {
+                    self.transparent.push(name);
+                }
+            }
         }
         let Some(hooks) = value else { return Ok(()) };
         let place = || format!("{} [{}]", manifest.display(), keys.join("."));
@@ -149,8 +177,16 @@ mod tests {
         .unwrap();
         let config = Config::load(&member).unwrap();
         assert!(config.hooks, "the package's own `enabled` wins");
+        assert!(config.transparent.is_empty());
         assert!(config.hook_excluded(&path("crate::a::f")), "the workspace's `exclude` still applies");
         assert_eq!(config.manifests.len(), 2);
+
+        fs::write(
+            member.join("Cargo.toml"),
+            "[package]\nname = \"m\"\n[package.metadata.scry]\ntransparent-attributes = [\"retry\", \"m::timed\"]\n",
+        )
+        .unwrap();
+        assert_eq!(Config::load(&member).unwrap().transparent, ["retry", "m::timed"]);
 
         fs::write(member.join("Cargo.toml"), "[package]\nname = \"m\"\n[package.metadata.scry.hooks]\nenable = true\n")
             .unwrap();

@@ -56,6 +56,19 @@ impl<K: PartialEq, V: Clone> Cache<K, V> {
     }
 }
 
+/// A label like `#7 Hammer`. Takes anything that converts into the name, as many APIs do.
+pub fn tag_label(id: u32, name: impl Into<String>) -> String {
+    format!("#{id} {}", name.into())
+}
+
+/// Totals prices the way code that waits on a service would: as an `async fn`. Nothing in the demo
+/// calls it; it is here to be called through scry.
+#[allow(dead_code)]
+pub async fn total_later(prices: Vec<i64>) -> i64 {
+    std::future::ready(()).await;
+    prices.iter().sum()
+}
+
 pub fn format_cents(cents: i64) -> String {
     format!("${}.{:02}", cents / 100, (cents % 100).abs())
 }

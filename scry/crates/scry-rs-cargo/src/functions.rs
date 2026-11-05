@@ -10,10 +10,18 @@
 //!
 //! - generic functions and impls, except for the instantiations the crate itself calls (see
 //!   [`crate::generics`]): each of those gets a shim of its own
-//! - `async` and `unsafe` functions
+//! - `unsafe` functions: a call cannot uphold what the caller of one must
 //! - methods taking `self` through `Box`/`Rc`/`Arc`; one taking `self` by value is called on a
 //!   clone, and refused at run time if the type is not `Clone`
-//! - parameters taking `&mut` or `impl Trait`
+//! - parameters taking `&mut` an unsized type other than `str` or a slice, or `impl Trait` other
+//!   than the conversions [`stand_in`] picks a type for (`impl Into<T>`, `impl AsRef<str>`,
+//!   `impl IntoIterator<Item = T>`, ...); never closures
+//!
+//! An `async fn`, or one returning `impl Future`, is run to completion by `scry::__private::block_on`,
+//! within the app's tokio runtime when it has one.
+//!
+//! A `&mut T` parameter gets a `T` built from JSON, and the call's reply then holds the value it
+//! was left with: `{"result": .., "args": {"name": ..}}`.
 //! - `main`, tests, and Dioxus components (capitalized names, `#[component]`): they only work
 //!   when the framework calls them
 
@@ -24,7 +32,9 @@ use quote::{ToTokens, quote};
 use syn::spanned::Spanned;
 use syn::visit::Visit;
 use syn::visit_mut::{self, VisitMut};
-use syn::{Attribute, FnArg, GenericParam, Lifetime, Path, ReturnType, Signature, Type};
+use syn::{
+    Attribute, FnArg, GenericArgument, GenericParam, Lifetime, Path, PathArguments, ReturnType, Signature, Type,
+};
 
 use crate::edits::Source;
 
@@ -50,19 +60,39 @@ const INERT_ATTRIBUTES: &[&str] = &[
     "link_section",
     "rustfmt",
     "clippy",
-    "instrument",
 ];
 
-/// The first attribute that is not known to leave the item as written.
-pub fn unknown_attribute(attrs: &[Attribute]) -> Option<String> {
+/// Attribute macros known to keep a function callable as written, and its body a body: matched by
+/// their last path segment, or the whole path where the name alone is too common.
+const TRANSPARENT_MACROS: &[&str] = &[
+    "instrument",     // tracing
+    "async_trait",    // async-trait, on impl blocks and traits
+    "cached",         // cached
+    "once",           // cached
+    "io_cached",      // cached
+    "memoize",        // memoize
+    "logfn",          // log-derive
+    "tauri::command", // tauri: the function stays a plain function next to the command
+    "trace",          // tracing-attributes' and others' function tracing
+];
+
+/// The first attribute that is not known to leave the item as written. `transparent` adds macros
+/// the crate's manifest vouches for (see `crate::config`), matched the same way as
+/// [`TRANSPARENT_MACROS`].
+pub fn unknown_attribute(attrs: &[Attribute], transparent: &[String]) -> Option<String> {
     attrs
         .iter()
         .map(|attr| attr.path())
-        .find(|path| {
-            !path.segments.first().is_some_and(|first| INERT_ATTRIBUTES.contains(&first.ident.to_string().as_str()))
-                && !path.segments.last().is_some_and(|last| last.ident == "instrument")
+        .map(|path| path.segments.iter().map(|segment| segment.ident.to_string()).collect::<Vec<_>>())
+        .find(|segments| {
+            let full = segments.join("::");
+            let last = segments.last().map(String::as_str).unwrap_or_default();
+            let known = |name: &str| name == full || name == last;
+            !segments.first().is_some_and(|first| INERT_ATTRIBUTES.contains(&first.as_str()))
+                && !TRANSPARENT_MACROS.iter().any(|name| known(name))
+                && !transparent.iter().any(|name| known(name))
         })
-        .map(|path| path.segments.iter().map(|segment| segment.ident.to_string()).collect::<Vec<_>>().join("::"))
+        .map(|segments| segments.join("::"))
 }
 
 /// The `#[cfg(..)]` attributes of the function and its impl, which the shim must share.
@@ -96,7 +126,13 @@ impl<'a> Callee<'a> {
 }
 
 /// The `static` to insert after the function, or why there is none.
-pub fn shim(source: &Source, attrs: &[Attribute], sig: &Signature, callee: &Callee<'_>) -> Result<String, String> {
+pub fn shim(
+    source: &Source,
+    attrs: &[Attribute],
+    sig: &Signature,
+    callee: &Callee<'_>,
+    transparent: &[String],
+) -> Result<String, String> {
     let name = sig.ident.to_string();
     if callee.self_ty.is_none() && name == "main" {
         return Err("it is the program's entry point".into());
@@ -109,11 +145,8 @@ pub fn shim(source: &Source, attrs: &[Attribute], sig: &Signature, callee: &Call
     if attrs.iter().any(|attr| attr.path().is_ident("test") || attr.path().is_ident("bench")) {
         return Err("it is a test".into());
     }
-    if let Some(attribute) = unknown_attribute(attrs) {
-        return Err(format!("its #[{attribute}] attribute may rewrite it"));
-    }
-    if sig.asyncness.is_some() {
-        return Err("it is async".into());
+    if let Some(attribute) = unknown_attribute(attrs, transparent) {
+        return Err(format!("its #[{attribute}] attribute may rewrite it; see transparent-attributes"));
     }
     if sig.unsafety.is_some() {
         return Err("it is unsafe".into());
@@ -137,6 +170,8 @@ pub fn shim(source: &Source, attrs: &[Attribute], sig: &Signature, callee: &Call
     let mut this = TokenStream::new();
     let mut args = Vec::new();
     let mut lets = Vec::new();
+    // The `&mut` arguments, by parameter name, reported after the call.
+    let mut changed = Vec::new();
     for input in &sig.inputs {
         match input {
             FnArg::Receiver(receiver_arg) => {
@@ -166,13 +201,51 @@ pub fn shim(source: &Source, attrs: &[Attribute], sig: &Signature, callee: &Call
             }
             FnArg::Typed(typed) => {
                 let index = lets.len();
-                let ty = spell(&typed.ty, callee.self_ty, &callee.subst)?;
                 let binding = quote::format_ident!("arg{index}");
+                if let Type::ImplTrait(bounds) = &*typed.ty {
+                    if callee.turbofish.is_some() {
+                        return Err("it takes `impl Trait` next to generic parameters".into());
+                    }
+                    let (stand_in, iterate) = stand_in(bounds)?;
+                    let ty = spell(&stand_in, callee.self_ty, &callee.subst)?;
+                    let build = build_from_json(quote!(probe_arg), &ty, quote!(&args[#index]));
+                    lets.push(quote!(let #binding: #ty = #build?;));
+                    args.push(if iterate {
+                        quote!(::core::iter::IntoIterator::into_iter(#binding))
+                    } else {
+                        quote!(#binding)
+                    });
+                    continue;
+                }
+                let ty = spell(&typed.ty, callee.self_ty, &callee.subst)?;
                 match ty {
+                    Type::Reference(reference) if reference.mutability.is_some() => {
+                        // Built owned, lent mutably, and read back after the call.
+                        let elem = &*reference.elem;
+                        let (owned, lend): (Type, TokenStream) = match elem {
+                            Type::Slice(slice) => {
+                                let item = &slice.elem;
+                                (syn::parse_quote!(::std::vec::Vec<#item>), quote!(&mut #binding[..]))
+                            }
+                            Type::Path(path) if path.qself.is_none() && path.path.is_ident("str") => {
+                                (syn::parse_quote!(::std::string::String), quote!(#binding.as_mut_str()))
+                            }
+                            Type::TraitObject(_) => return Err("it takes `&mut dyn Trait`".into()),
+                            Type::Path(path)
+                                if path.path.segments.last().is_some_and(|last| {
+                                    matches!(last.ident.to_string().as_str(), "Path" | "OsStr" | "CStr")
+                                }) =>
+                            {
+                                return Err(format!("it takes `&mut {}`", compact(elem)));
+                            }
+                            _ => (elem.clone(), quote!(&mut #binding)),
+                        };
+                        let build = build_from_json(quote!(probe_arg), &owned, quote!(&args[#index]));
+                        lets.push(quote!(let mut #binding: #owned = #build?;));
+                        args.push(lend);
+                        changed.push((param_name(&typed.pat, index), binding));
+                    }
                     Type::Reference(reference) => {
-                        if reference.mutability.is_some() {
-                            return Err("it takes a `&mut` argument".into());
-                        }
                         let elem = &reference.elem;
                         let build = build_from_json(quote!(probe_ref_arg), elem, quote!(&args[#index]));
                         lets.push(quote!(let #binding = #build?;));
@@ -225,6 +298,37 @@ pub fn shim(source: &Source, attrs: &[Attribute], sig: &Signature, callee: &Call
     let start = sig.ident.span().start();
     let unique = quote::format_ident!("__SCRY_FN_{}_{}_{}", start.line, start.column, callee.variant);
 
+    let awaited = sig.asyncness.is_some()
+        || matches!(&sig.output, ReturnType::Type(_, ty) if matches!(&**ty, Type::ImplTrait(bounds)
+            if bounds.bounds.iter().any(|bound| matches!(bound, syn::TypeParamBound::Trait(bound)
+                if bound.path.segments.last().is_some_and(|last| last.ident == "Future")))));
+    let invoke = if awaited {
+        quote!(::scry::__private::block_on(#callee_tokens(#(#args),*))?)
+    } else {
+        quote!(#callee_tokens(#(#args),*))
+    };
+    // The result is snapshotted, and let go, before the `&mut` arguments are read: it may borrow them.
+    let call = if changed.is_empty() {
+        quote! {
+            let result = #invoke;
+            ::core::result::Result::Ok(::scry::__private::probe_ref!(&result).snapshot(depth))
+        }
+    } else {
+        let (names, bindings): (Vec<String>, Vec<_>) = changed.into_iter().unzip();
+        quote! {
+            let result = {
+                let result = #invoke;
+                ::scry::__private::probe_ref!(&result).snapshot(depth)
+            };
+            let mut changed = ::scry::__private::Map::new();
+            #(changed.insert(::std::string::String::from(#names), ::scry::__private::probe_ref!(&#bindings).snapshot(depth));)*
+            let mut reply = ::scry::__private::Map::new();
+            reply.insert(::std::string::String::from("result"), result);
+            reply.insert(::std::string::String::from("args"), ::scry::Value::Object(changed));
+            ::core::result::Result::Ok(::scry::Value::Object(reply))
+        }
+    };
+
     let cfgs = &callee.cfgs;
     let shim = quote! {
         #cfgs
@@ -241,8 +345,7 @@ pub fn shim(source: &Source, attrs: &[Attribute], sig: &Signature, callee: &Call
                 use ::scry::__private::{ViaClone as _, ViaNoClone as _};
                 #this
                 #(#lets)*
-                let result = #callee_tokens(#(#args),*);
-                ::core::result::Result::Ok(::scry::__private::probe_ref!(&result).snapshot(depth))
+                #call
             }
             ::scry::__private::Function {
                 name: #name,
@@ -257,6 +360,83 @@ pub fn shim(source: &Source, attrs: &[Attribute], sig: &Signature, callee: &Call
         };
     };
     Ok(format!(" {shim}"))
+}
+
+/// The type a shim builds for an `impl Trait` parameter, and whether it is passed as an iterator
+/// over it: one that is sure to meet every bound, or why there is none.
+///
+/// - `impl Into<T>`, `impl Borrow<T>` → `T` (`String` for `str`)
+/// - `impl AsRef<str>`, `impl ToString`, `impl Display` → `String`; `impl AsRef<Path>` → `PathBuf`;
+///   `impl AsRef<OsStr>` → `OsString`; `impl AsRef<[T]>` → `Vec<T>`
+/// - `impl IntoIterator<Item = T>` → `Vec<T>`; `impl Iterator<Item = T>` → a `Vec<T>`'s iterator
+///
+/// Besides one of these, only `Send`, `Sync`, `Unpin`, `Sized` and lifetimes are allowed: any
+/// other bound could rule the stand-in out, and the shim would not compile.
+pub fn stand_in(bounds: &syn::TypeImplTrait) -> Result<(Type, bool), String> {
+    let refuse = || format!("it takes `{}`, which no type is picked for", compact(bounds));
+    let mut picked: Option<(Type, bool)> = None;
+    for bound in &bounds.bounds {
+        let syn::TypeParamBound::Trait(bound) = bound else { continue };
+        let Some(last) = bound.path.segments.last() else { return Err(refuse()) };
+        let name = last.ident.to_string();
+        if matches!(name.as_str(), "Send" | "Sync" | "Unpin" | "Sized") && last.arguments.is_empty() {
+            continue;
+        }
+        let arguments: Vec<&GenericArgument> = match &last.arguments {
+            PathArguments::AngleBracketed(arguments) => arguments.args.iter().collect(),
+            PathArguments::None => Vec::new(),
+            PathArguments::Parenthesized(_) => return Err(refuse()),
+        };
+        let only_type = match arguments.as_slice() {
+            [GenericArgument::Type(ty)] => Some(ty),
+            _ => None,
+        };
+        let item = match arguments.as_slice() {
+            [GenericArgument::AssocType(assoc)] if assoc.ident == "Item" => Some(&assoc.ty),
+            _ => None,
+        };
+        let owned = |ty: &Type| -> Option<Type> {
+            let last = match ty {
+                Type::Path(path) if path.qself.is_none() => {
+                    path.path.segments.last().map(|last| last.ident.to_string())
+                }
+                _ => None,
+            };
+            match ty {
+                _ if last.as_deref() == Some("str") => Some(syn::parse_quote!(::std::string::String)),
+                _ if last.as_deref() == Some("Path") => Some(syn::parse_quote!(::std::path::PathBuf)),
+                _ if last.as_deref() == Some("OsStr") => Some(syn::parse_quote!(::std::ffi::OsString)),
+                Type::Slice(slice) => {
+                    let item = &slice.elem;
+                    Some(syn::parse_quote!(::std::vec::Vec<#item>))
+                }
+                _ => None,
+            }
+        };
+        let choice: Option<(Type, bool)> = match (name.as_str(), only_type, item) {
+            ("Into" | "Borrow", Some(ty), _) => Some((owned(ty).unwrap_or_else(|| ty.clone()), false)),
+            ("AsRef", Some(ty), _) => owned(ty).map(|ty| (ty, false)),
+            ("ToString" | "Display", None, None) if arguments.is_empty() => {
+                Some((syn::parse_quote!(::std::string::String), false))
+            }
+            ("IntoIterator", _, Some(item)) => Some((syn::parse_quote!(::std::vec::Vec<#item>), false)),
+            ("Iterator", _, Some(item)) => Some((syn::parse_quote!(::std::vec::Vec<#item>), true)),
+            _ => None,
+        };
+        match (choice, &picked) {
+            (Some(choice), None) => picked = Some(choice),
+            _ => return Err(refuse()),
+        }
+    }
+    picked.ok_or_else(refuse)
+}
+
+/// A parameter's name for the reply: its identifier, or `arg<index>` for a pattern.
+fn param_name(pat: &syn::Pat, index: usize) -> String {
+    match pat {
+        syn::Pat::Ident(ident) => ident.ident.to_string(),
+        _ => format!("arg{index}"),
+    }
 }
 
 /// The expression that builds a `ty` from the JSON `value` through `probe` (`probe_arg`,

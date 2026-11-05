@@ -83,6 +83,7 @@ fn main() {
     {
         let session = state.session.read();
         println!("session {} opened {}", session.id, session.opened.format("%Y-%m-%d %H:%M:%S UTC"));
+        println!("{}", util::tag_label(1, "first run"));
     }
 
     let worker_state = Arc::clone(state);

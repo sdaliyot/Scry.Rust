@@ -38,6 +38,7 @@ pub mod peel;
 pub mod probes;
 mod reflect;
 mod registry;
+mod run_async;
 #[cfg(feature = "script")]
 mod script;
 mod wait;

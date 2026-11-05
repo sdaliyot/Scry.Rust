@@ -138,11 +138,41 @@ Callable means:
 - module-level functions, and methods and associated functions of module-level `impl` blocks
   (inherent or trait)
 - not generic, or generic and called by the crate with concrete types (see below)
-- not `async` or `unsafe`
-- no `&mut` or `impl Trait` parameters
+- not `unsafe`: a call can't uphold what the caller of one must
 - not `main`, a test or a UI component
 
-Functions behind unknown attribute macros are skipped, because the macro may rewrite them.
+Some parameters and functions are handled specially:
+- **`&mut` parameters:** the argument is built from JSON (a `Vec` for `&mut [T]`, a `String` for
+  `&mut str`) and lent to the call. The reply then also holds the values it was left with:
+  `scry call clamp_all::<i64> [5,-3,2000000] 1 1000000` gives
+  `{"result": null, "args": {"values": [5, 1, 1000000]}}`.
+- **`impl Trait` parameters:** a type is picked when it's sure to meet the bounds:
+  - `impl Into<T>` and `impl Borrow<T>` take a `T`
+  - `impl AsRef<str>`, `impl ToString` and `impl Display` take a `String`
+  - `impl AsRef<Path>` takes a `PathBuf`
+  - `impl IntoIterator<Item = T>` and `impl Iterator<Item = T>` take a list
+
+  `Send`, `Sync` and lifetimes may come along. Any other bound, and every closure (`impl Fn`),
+  leaves the function uncallable.
+- **`async fn`, or one returning `impl Future`:** it runs to completion on the registry's thread.
+  In a tokio app it runs inside the app's own runtime, which the endpoint picks up at the top of
+  `main` (`#[tokio::main]` included), so timers, I/O and `spawn` work. A call still running after
+  8 seconds is cancelled with `timeout`, before the endpoint's 10-second wait for the registry
+  would give up with `target_busy`. In a Dioxus app that thread is the UI thread: the UI
+  waits, and a future that waits on the UI only ends in that timeout. A runtime the app builds by
+  hand after `main` starts isn't found, and a future that needs it panics.
+
+**Attribute macros.** A function under an attribute macro is skipped, because the macro may rewrite
+it. The exceptions are macros known to keep the function callable as written: `tracing`'s
+`instrument`, `async_trait`, `cached`/`once`/`io_cached`, `memoize`, `logfn`, `trace` and
+`tauri::command`. A crate can vouch for others. They then get call shims and hook points:
+
+```toml
+[package.metadata.scry]                 # or [workspace.metadata.scry]; the lists are combined
+transparent-attributes = ["my_retry", "metrics::timed"]   # an attribute's last segment or full path
+```
+
+If a listed macro does rewrite the body, the build falls back as described under hooks below.
 `scry-report.txt` lists every skipped function and why.
 
 Scripts call a value's methods with method syntax. When the type has its own method with the same
@@ -245,7 +275,7 @@ exclude = ["crate::util::next_random", "crate::auth::*"]
 - `const` and `unsafe` functions, `#[track_caller]`
 - functions returning `!` or `impl Trait`
 - a body starting with an inner attribute
-- `main`, tests, UI components, and functions under unknown attribute macros
+- `main`, tests, UI components, and functions under attribute macros not known or listed (see above)
 
 If a crate doesn't compile with its hook points, `cargo scry` builds it again without them and warns.
 `SCRY_VERBOSE=1` shows why. See [docs/design/hooks.md](docs/design/hooks.md) for the design.

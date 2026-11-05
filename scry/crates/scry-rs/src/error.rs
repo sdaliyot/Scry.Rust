@@ -72,6 +72,8 @@ pub enum Error {
     Script(String),
     /// A script ran past its time or size limits and was stopped.
     ScriptLimit(String),
+    /// A called `async fn` did not finish in time.
+    Timeout(String),
 }
 
 impl Error {
@@ -99,6 +101,7 @@ impl Error {
             Error::AssertionFailed(_) => "assertion_failed",
             Error::Script(_) => "script_error",
             Error::ScriptLimit(_) => "script_limit",
+            Error::Timeout(_) => "timeout",
         }
     }
 
@@ -153,6 +156,7 @@ impl fmt::Display for Error {
             Error::AssertionFailed(message) => write!(f, "assertion failed: {message}"),
             Error::Script(message) => write!(f, "script error: {message}"),
             Error::ScriptLimit(message) => write!(f, "script stopped: {message}"),
+            Error::Timeout(message) => write!(f, "timed out: {message}"),
         }
     }
 }
