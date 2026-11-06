@@ -102,8 +102,11 @@ fn build(verb: &str, rest: &str) -> Result<String, Error> {
         "click" => {
             let selector = whole_argument(rest, "a selector")?;
             format!(
-                "const el = __scry.get({selector}); el.scrollIntoView({{ block: \"nearest\" }}); el.click(); \
-                 return __scry.describe(el);",
+                // Clicked on the next tick, after the answer is on its way: a click that makes the app
+                // navigate can otherwise cost the answer (the webview drops it while handling the
+                // click's event).
+                "const el = __scry.get({selector}); el.scrollIntoView({{ block: \"nearest\" }}); \
+                 const clicked = __scry.describe(el); setTimeout(() => el.click(), 0); return clicked;",
                 selector = quote(&selector)
             )
         }
@@ -219,7 +222,10 @@ mod tests {
     fn commands_become_scripts_with_quoted_arguments() {
         assert!(script("get ui").is_none());
         let click = script("click text=Add").unwrap().unwrap();
-        assert!(click.contains("__scry.get(\"text=Add\")") && click.contains("el.click()"), "{click}");
+        assert!(
+            click.contains("__scry.get(\"text=Add\")") && click.contains("setTimeout(() => el.click(), 0)"),
+            "{click}"
+        );
         let typed = script("type \"li input.title\" Buy \"milk\"").unwrap().unwrap();
         assert!(typed.contains("__scry.get(\"li input.title\")"), "{typed}");
         assert!(typed.contains("setter.call(el, \"Buy \\\"milk\\\"\")"), "{typed}");
