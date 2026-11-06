@@ -122,6 +122,24 @@ Dioxus's dev-build toast is, don't match and are left out of `text`. These comma
 asynchronously on the UI thread, so the app keeps handling events while one waits. They aren't
 available inside `eval` scripts.
 
+### Errors on the page
+
+A component error - a route that doesn't parse (`/tasks/abc` for `/tasks/:id` with a number), an
+event handler that returns `Err` - goes to the nearest error boundary, which shows it in place of its
+children until it is cleared. `ui.errors` lists what the window's boundaries are showing:
+
+```powershell
+scry set ui.route '"/tasks/abc"'          # accepted: it fits /tasks/:id; whether :id parses is the app's call
+scry get ui.errors                        # ["Failed to parse route ..."]
+scry set ui.route '"/"'                   # somewhere that renders, then
+scry call ui::clear_errors                # clears the boundaries, which render their children again
+```
+
+Scry sees the root boundary every virtual dom has, and each `ErrorBoundary` a tracked component
+renders under; one that holds an error stays listed after the components under it unmount. The
+endpoint keeps running while the root boundary shows an error, which unmounts the app's root
+component.
+
 ### Resources and actions
 
 `use_resource` and `use_action` handles are tracked like signals, read-only, with the operations the

@@ -7,7 +7,8 @@
 //! marshal onto it to read or write them - the Rust equivalent of Scry.NET's WPF/WinForms adapters.
 //! It also has a router with a few pages, to switch between from outside (`scry set ui.route ...`),
 //! and opens a second window (About, "Open a notes window") for `scry windows`. About also loads the
-//! board's stats with `use_resource` and clears finished tasks with `use_action`.
+//! board's stats with `use_resource` and clears finished tasks with `use_action`. An error boundary
+//! around the pages catches a route that doesn't parse (`/tasks/abc`) and About's Fail button.
 
 // `#[derive(Routable)]` writes `child: child` for a `#[child]` route.
 #![allow(clippy::redundant_field_names)]
@@ -85,7 +86,15 @@ fn App() -> Element {
         div { style: "font-family: 'Segoe UI', sans-serif; padding: 16px;",
             h2 { "Scry.Rust dx demo" }
             p { "pid {pid} · up {uptime}s · {summary}" }
-            Router::<Route> {}
+            // Catches a page's errors - a route that doesn't parse, a handler that fails - and
+            // keeps the header up while it shows them.
+            ErrorBoundary {
+                handle_error: |errors: ErrorContext| rsx! {
+                    p { style: "color: #b00;", "Something went wrong: {errors.error().map(|error| error.to_string()).unwrap_or_default()}" }
+                    button { onclick: move |_| errors.clear_errors(), "Try again" }
+                },
+                Router::<Route> {}
+            }
         }
     }
 }
@@ -170,6 +179,14 @@ fn About() -> Element {
             }
         }
         button { onclick: move |_| { clear_done.call(); }, "Clear finished tasks" }
+        button {
+            // A handler that fails: its error goes to the nearest error boundary.
+            onclick: move |_| {
+                let _count: u32 = "many".parse()?;
+                Ok(())
+            },
+            "Fail"
+        }
         if clear_done.pending() {
             span { " clearing…" }
         } else if let Some(Ok(removed)) = clear_done.value() {

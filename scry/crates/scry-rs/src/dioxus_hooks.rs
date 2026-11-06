@@ -13,7 +13,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::rc::{Rc, Weak};
 
-use dioxus_core::{Runtime, ScopeId, current_scope_id, spawn, use_hook};
+use dioxus_core::{ErrorContext, Runtime, ScopeId, current_scope_id, spawn_forever, use_hook};
 use futures_channel::mpsc::UnboundedReceiver;
 use futures_util::StreamExt;
 use serde_json::{Map, Value};
@@ -35,6 +35,8 @@ struct Hook {
 thread_local! {
     static HOOKS: RefCell<Vec<Hook>> = const { RefCell::new(Vec::new()) };
     static NEXT_ID: Cell<u64> = const { Cell::new(0) };
+    /// Error boundaries seen above tracked components, by window; see [`error_boundaries`].
+    static BOUNDARIES: RefCell<Vec<(Option<u64>, ErrorContext)>> = const { RefCell::new(Vec::new()) };
 }
 
 /// Removes its hook when the component instance that owns it is dropped.
@@ -63,6 +65,7 @@ pub fn track(component: &'static str, name: &'static str, value: impl FnOnce() -
         });
         let scope = current_scope_id().0;
         let window = current_window();
+        remember_boundary(window);
         HOOKS.with(|hooks| hooks.borrow_mut().push(Hook { id, window, scope, component, name, value: value() }));
         Rc::new(Registration(id))
     });
@@ -92,7 +95,9 @@ pub fn use_endpoint() {
         current_window();
         let jobs = JOBS.lock().ok().and_then(|mut jobs| jobs.take());
         if let Some(mut jobs) = jobs {
-            spawn(async move {
+            // At the root scope, not the component's: an error that reaches the root error boundary
+            // unmounts the app's root component, and the endpoint has to outlive it to report it.
+            spawn_forever(async move {
                 let registry = crate::Registry::discovered();
                 while let Some((command, reply)) = jobs.next().await {
                     let answer = answer(&registry, &command).await;
@@ -450,14 +455,94 @@ impl Reflect for Ui {
 
 /// The members of `ui` that are not components: the router's state, when the app has a router.
 fn extras() -> Vec<(&'static str, Box<dyn Reflect>)> {
-    #[allow(unused_mut)]
     let mut extras: Vec<(&'static str, Box<dyn Reflect>)> = Vec::new();
+    if Runtime::try_current().is_some() {
+        extras.push((ERRORS, Box::new(errors())));
+    }
     #[cfg(feature = "dioxus-router")]
     if let Some(router) = crate::dioxus_router::router() {
         extras.extend(crate::dioxus_router::members(router));
     }
     extras
 }
+
+// ---- Errors ----
+//
+// An error a component returns or throws (a route that doesn't parse, an `onclick` that returns
+// `Err`) goes to the nearest error boundary, which shows it instead of its children until it is
+// cleared. `ui.errors` lists what the window's boundaries hold: the root one every virtual dom has,
+// and the nearest one above each component Scry tracks. `ui::clear_errors` clears them, so they
+// render their children again.
+
+const ERRORS: &str = "errors";
+
+/// The error boundaries Scry can see in the current window: the root one, and each boundary a
+/// tracked component mounted under. One is remembered from then on while it shows an error - by
+/// then the components under it have unmounted - or while a tracked component is still under it.
+fn error_boundaries() -> Vec<ErrorContext> {
+    let Some(runtime) = Runtime::try_current() else { return Vec::new() };
+    let window = current_window();
+    let scopes: Vec<usize> =
+        HOOKS.with(|hooks| hooks.borrow().iter().filter(|hook| hook.window == window).map(|hook| hook.scope).collect());
+    let mut live: Vec<ErrorContext> = Vec::new();
+    for scope in std::iter::once(ScopeId::ROOT_ERROR_BOUNDARY.0).chain(scopes) {
+        // A scope Scry tracks is mounted, but a lookup of one that isn't panics: don't let it.
+        let found = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            runtime.consume_context::<ErrorContext>(ScopeId(scope))
+        }));
+        if let Ok(Some(boundary)) = found
+            && !live.contains(&boundary)
+        {
+            live.push(boundary);
+        }
+    }
+    BOUNDARIES.with(|seen| {
+        let mut seen = seen.borrow_mut();
+        seen.retain(|(in_window, boundary)| {
+            *in_window != window || live.contains(boundary) || boundary.error().is_some()
+        });
+        for (_, boundary) in seen.iter().filter(|(in_window, _)| *in_window == window) {
+            if !live.contains(boundary) {
+                live.push(boundary.clone());
+            }
+        }
+    });
+    live
+}
+
+/// Remembers the boundary above the component being rendered; see [`error_boundaries`].
+fn remember_boundary(window: Option<u64>) {
+    let Some(boundary) = dioxus_core::try_consume_context::<ErrorContext>() else { return };
+    BOUNDARIES.with(|seen| {
+        let mut seen = seen.borrow_mut();
+        if !seen.iter().any(|(in_window, known)| *in_window == window && *known == boundary) {
+            seen.push((window, boundary));
+        }
+    });
+}
+
+/// `ui.errors`: the errors the window's boundaries are showing.
+fn errors() -> Vec<String> {
+    error_boundaries().iter().filter_map(ErrorContext::error).map(|error| error.to_string()).collect()
+}
+
+#[linkme::distributed_slice(crate::__private::FUNCTIONS)]
+#[linkme(crate = linkme)]
+static CLEAR_ERRORS: crate::call::Function = crate::call::Function {
+    name: "clear_errors",
+    path: "scry::ui::clear_errors",
+    signature: "fn clear_errors() -> usize  // clears ui.errors, so their boundaries render again",
+    receiver: crate::call::Receiver::None,
+    self_type: None,
+    trait_name: None,
+    arity: 0,
+    invoke: |_, _, _| {
+        let boundaries: Vec<ErrorContext> =
+            error_boundaries().into_iter().filter(|boundary| boundary.error().is_some()).collect();
+        boundaries.iter().for_each(ErrorContext::clear_errors);
+        Ok(Value::from(boundaries.len()))
+    },
+};
 
 fn component<'a, 'b>(
     tree: &'a BTreeMap<&'static str, Component<'b>>,
