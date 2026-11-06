@@ -227,8 +227,22 @@ scry eval 'APP.labels.get(999)'             # Cache<u32, String>::get on the liv
 - Each instantiation's type arguments must be nameable from the function's module: a crate type
   visible there, a std type, or a primitive. Closures, and types private to another module, drop
   that instantiation.
-- The extra MIR pass runs only for crates that have generic items. On the demo it adds about
-  2 seconds to a rebuild.
+- The extra MIR pass runs only for crates that have generic items. The calls it finds are saved in
+  `target/scry/<profile>/scry-src/<crate>.generics`, and the next build reuses them unless the
+  compilation changed or an item that defines or mentions a generic function or type changed.
+  Mentions include calls to methods of generic types. So after most edits the pass is skipped.
+  Comments and formatting never count.
+- The reuse can miss one kind of edit. Say an edit changes which type an unchanged call is
+  inferred with, through a field or return type that names no generic. Then the old
+  instantiation is kept and the new one shows up after the next MIR pass. If a reused
+  instantiation no longer compiles, the build runs the MIR pass again before falling back.
+- In a large crate the pass costs as much as a check build. To skip it, and the shims of generic
+  functions and types with it:
+
+  ```toml
+  [package.metadata.scry.generics]   # or [workspace.metadata.scry.generics] for every crate
+  enabled = false                    # default true
+  ```
 
 ## Hooking calls
 

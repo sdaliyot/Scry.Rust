@@ -59,6 +59,9 @@ impl Report {
     }
 }
 
+/// Why a generic function or impl is skipped when the search for instantiations is turned off.
+const GENERICS_OFF: &str = "generic, and generics are off by [package.metadata.scry.generics]";
+
 pub struct Context<'a> {
     /// Traits, by name, that get `dyn` reflection. Impls are matched by the trait's last path
     /// segment, so a name is only here if every trait of that name in the crate qualifies.
@@ -72,6 +75,8 @@ pub struct Context<'a> {
     pub index: &'a Index,
     /// The concrete uses of the crate's generic functions and types, by name.
     pub uses: &'a HashMap<String, HashSet<Use>>,
+    /// Uses were looked for: off by `[package.metadata.scry.generics]`, `uses` is empty for that.
+    pub generics: bool,
     pub crate_name: &'a str,
     /// Hook points are compiled in, with these exclusions; `None` when they are off.
     pub hook_points: Option<&'a Config>,
@@ -357,6 +362,8 @@ impl Generator<'_> {
         if let Some(problem) = problems.first() {
             let reason = format!("generic, and not every instantiation can be called: {problem}");
             self.report.skipped("fn", &name, &reason);
+        } else if !self.cx.generics {
+            self.report.skipped("fn", &name, GENERICS_OFF);
         } else if uses.is_empty() {
             self.report.skipped("fn", &name, "generic, and the crate never calls it with concrete types");
         }
@@ -481,7 +488,12 @@ impl Generator<'_> {
             }
         };
         if found.is_empty() && has_methods {
-            self.report.skipped("impl", &label, "generic, and the crate never calls its methods with concrete types");
+            let reason = if self.cx.generics {
+                "generic, and the crate never calls its methods with concrete types"
+            } else {
+                GENERICS_OFF
+            };
+            self.report.skipped("impl", &label, reason);
         }
         let mut shims = String::new();
         for (variant, instance) in found.iter().enumerate() {
@@ -1104,6 +1116,7 @@ mod tests {
             endpoint: None,
             index: &index,
             uses: &uses,
+            generics: true,
             crate_name: "app",
             hook_points,
             transparent: &["my_macro".to_owned()],

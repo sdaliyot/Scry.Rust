@@ -128,15 +128,17 @@ pub fn run(rustc: OsString, args: Vec<OsString>) -> u8 {
     let crate_name = invocation.values("--crate-name").next().unwrap_or("crate").to_owned();
     let mir = OnceCell::new();
     let mut first_error = None;
-    for hook_points in [true, false] {
-        let attempt = match rewritten(&rustc, &invocation, hook_points, &mir) {
+    let mut fresh_generics = false;
+    let mut attempts = std::collections::VecDeque::from([true, false]);
+    while let Some(hook_points) = attempts.pop_front() {
+        let attempt = match rewritten(&rustc, &invocation, hook_points, fresh_generics, &mir) {
             Ok(attempt) => attempt,
             Err(error) => {
                 eprintln!("warning: scry: not generating a registry for `{crate_name}`: {error}");
                 return exec(&rustc, &invocation.args);
             }
         };
-        if hook_points && attempt.hook_points == 0 {
+        if hook_points && attempt.hook_points == 0 && !attempt.generics_reused {
             // Nothing to leave out on a retry.
             return finish(&rustc, &attempt, exec(&rustc, &attempt.args));
         }
@@ -150,6 +152,17 @@ pub fn run(rustc: OsString, args: Vec<OsString>) -> u8 {
                 );
             }
             return finish(&rustc, &attempt, 0);
+        }
+        if attempt.generics_reused {
+            // The last build's generic instantiations may be out of date in a way the key can't
+            // see. Find them again before blaming the generated code.
+            if env::var_os(VERBOSE).is_some() {
+                eprintln!("scry: attempt for `{crate_name}` with the last build's generic instantiations failed:");
+                replay(&stdout, &stderr);
+            }
+            fresh_generics = true;
+            attempts.push_front(hook_points);
+            continue;
         }
         first_error.get_or_insert_with(|| first_error_message(&stderr));
         if env::var_os(VERBOSE).is_some() {
@@ -190,12 +203,14 @@ struct Rewritten {
     /// metadata change on its own, so they are added to the dependency file.
     manifests: Vec<PathBuf>,
     hook_points: usize,
+    generics_reused: bool,
 }
 
 fn rewritten(
     rustc: &OsString,
     invocation: &Invocation,
     hook_points: bool,
+    fresh_generics: bool,
     mir: &OnceCell<Result<String, String>>,
 ) -> Result<Rewritten, String> {
     let cwd = env::current_dir().map_err(|error| error.to_string())?;
@@ -218,6 +233,13 @@ fn rewritten(
         crate_name: crate_name.to_owned(),
         config,
         hook_points,
+        fresh_generics,
+        generics_seed: format!(
+            "{}\n{}\n{}",
+            rustc.to_string_lossy(),
+            env::var(GENERATOR_ID).unwrap_or_default(),
+            invocation.args.join("\n")
+        ),
         dioxus: invocation.has_extern("dioxus"),
         // A test harness supplies its own `main`.
         executable: invocation.values("--crate-type").any(|kind| kind == "bin")
@@ -246,7 +268,14 @@ fn rewritten(
             None => None,
         })
     });
-    Ok(Rewritten { args, dep_info, mappings, manifests, hook_points: output.hook_points })
+    Ok(Rewritten {
+        args,
+        dep_info,
+        mappings,
+        manifests,
+        hook_points: output.hook_points,
+        generics_reused: output.generics_reused,
+    })
 }
 
 /// Compiles the original sources once more, to MIR only, for the generic instantiations they use.

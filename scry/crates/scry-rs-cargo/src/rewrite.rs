@@ -10,6 +10,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
+use quote::ToTokens;
 use syn::visit::Visit;
 
 use crate::config::Config;
@@ -27,6 +28,8 @@ pub struct Output {
     pub external_drives: Vec<String>,
     /// How many hook points were compiled in.
     pub hook_points: usize,
+    /// The generic instantiations were the last build's, reused without a MIR pass.
+    pub generics_reused: bool,
 }
 
 pub struct Paths<'a> {
@@ -78,6 +81,11 @@ pub struct Options {
     /// Compile hook points in, as far as `config` allows. Off for the retry after they failed to
     /// compile.
     pub hook_points: bool,
+    /// Find the generic instantiations with a MIR pass even when the last build's still apply.
+    pub fresh_generics: bool,
+    /// What identifies the compilation besides its sources (rustc, its arguments, the generator),
+    /// for the key of the saved generic instantiations.
+    pub generics_seed: String,
 }
 
 /// Rewrites the crate at `root`. `mir` compiles the original sources to a MIR dump, run only when
@@ -105,12 +113,40 @@ pub fn rewrite_crate(
     for file in &files {
         index.add_file(&file.module, &file.syntax);
     }
+    let mut generics_reused = false;
     let uses = if index.generic_names.is_empty() {
         HashMap::new()
+    } else if !options.config.generics {
+        report.lines.push(
+            "generic instantiations: off, by [package.metadata.scry.generics]; generic functions and types are skipped"
+                .into(),
+        );
+        HashMap::new()
     } else {
-        match mir() {
-            Ok(text) => scan(&text, &index.generic_names),
+        let saved = paths.mirror_root.with_extension("generics");
+        let key = generics_key(&options.generics_seed, &files, &index.generic_names);
+        let reused = if options.fresh_generics { None } else { read_saved(&saved, &key) };
+        let calls = match reused {
+            Some(calls) => {
+                generics_reused = true;
+                report.lines.push(
+                    "generic instantiations: the last build's, since no generic code or code using it changed".into(),
+                );
+                Ok(calls)
+            }
+            None => mir().map(|text| {
+                let calls = calls_of(&text, &index.generic_names);
+                if let Some(parent) = saved.parent() {
+                    let _ = fs::create_dir_all(parent);
+                }
+                let _ = fs::write(&saved, format!("{key}\n{calls}"));
+                calls
+            }),
+        };
+        match calls {
+            Ok(calls) => scan(&calls, &index.generic_names),
             Err(error) => {
+                let _ = fs::remove_file(&saved);
                 report.lines.push(format!("generic instantiations: not found, {error}"));
                 HashMap::new()
             }
@@ -122,6 +158,7 @@ pub fn rewrite_crate(
         endpoint: options.executable.then_some(&launches.roots),
         index: &index,
         uses: &uses,
+        generics: options.config.generics,
         crate_name: &options.crate_name,
         hook_points: (options.hook_points && options.config.hooks).then_some(&options.config),
         transparent: &options.config.transparent,
@@ -188,7 +225,126 @@ pub fn rewrite_crate(
     );
     let _ = fs::write(paths.mirror_root.join("scry-report.txt"), report);
 
-    Ok(Output { root: paths.mirror_of(root), external_drives: external_drives.into_iter().collect(), hook_points })
+    Ok(Output {
+        root: paths.mirror_of(root),
+        external_drives: external_drives.into_iter().collect(),
+        hook_points,
+        generics_reused,
+    })
+}
+
+/// A key for the generic instantiations a crate uses: what MIR shows of them can only change when
+/// the compilation itself does (`seed`), or an item that defines or mentions a generic function or
+/// type changes, or calls a method of a generic type. Every other item can change freely, and
+/// so can comments and formatting.
+///
+/// An item that changes the inferred type at an unchanged call site (a field's type, a function's
+/// return type) is missed when it names no generic: the old instantiation is kept, and the new one
+/// is not found until the next MIR pass.
+fn generics_key(seed: &str, files: &[File], names: &HashSet<String>) -> String {
+    use std::hash::{Hash, Hasher};
+
+    let mut watched = names.clone();
+    for file in files {
+        generic_type_methods(&file.syntax.items, names, &mut watched);
+    }
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    seed.hash(&mut hasher);
+    let mut sorted: Vec<&String> = watched.iter().collect();
+    sorted.sort();
+    sorted.hash(&mut hasher);
+    for file in files {
+        file.module.hash(&mut hasher);
+        hash_items(&file.syntax.items, &watched, &mut hasher);
+    }
+    format!("{:016x}", hasher.finish())
+}
+
+/// Adds the names of methods defined for generic types (`get` of `impl<K, V> Cache<K, V>`): a call
+/// to one need not name the type.
+fn generic_type_methods(items: &[syn::Item], names: &HashSet<String>, methods: &mut HashSet<String>) {
+    for item in items {
+        match item {
+            syn::Item::Impl(item) if mentions(item.self_ty.to_token_stream(), names) => {
+                for impl_item in &item.items {
+                    if let syn::ImplItem::Fn(method) = impl_item {
+                        methods.insert(method.sig.ident.to_string());
+                    }
+                }
+            }
+            syn::Item::Mod(item) => {
+                if let Some((_, items)) = &item.content {
+                    generic_type_methods(items, names, methods);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn hash_items(items: &[syn::Item], watched: &HashSet<String>, hasher: &mut impl std::hash::Hasher) {
+    use std::hash::Hash;
+
+    for item in items {
+        match item {
+            syn::Item::Mod(item) if item.content.is_some() => {
+                item.ident.to_string().hash(hasher);
+                if let Some((_, items)) = &item.content {
+                    hash_items(items, watched, hasher);
+                }
+            }
+            syn::Item::Impl(item) => {
+                let generics = &item.generics;
+                let self_ty = &item.self_ty;
+                let trait_ = item.trait_.as_ref().map(|(_, path, _)| path);
+                let header = quote::quote!(impl #generics #trait_ for #self_ty);
+                if mentions(header.clone(), watched) {
+                    item.to_token_stream().to_string().hash(hasher);
+                    continue;
+                }
+                for impl_item in &item.items {
+                    let tokens = impl_item.to_token_stream();
+                    if mentions(tokens.clone(), watched) {
+                        header.to_string().hash(hasher);
+                        tokens.to_string().hash(hasher);
+                    }
+                }
+            }
+            item => {
+                let tokens = item.to_token_stream();
+                if mentions(tokens.clone(), watched) {
+                    tokens.to_string().hash(hasher);
+                }
+            }
+        }
+    }
+}
+
+/// Whether `tokens` hold one of `names` as an identifier, at any depth.
+fn mentions(tokens: proc_macro2::TokenStream, names: &HashSet<String>) -> bool {
+    tokens.into_iter().any(|tree| match tree {
+        proc_macro2::TokenTree::Ident(ident) => names.contains(&ident.to_string()),
+        proc_macro2::TokenTree::Group(group) => mentions(group.stream(), names),
+        _ => false,
+    })
+}
+
+/// The lines of a MIR dump that can hold a use of one of `names`: all that [`scan`] needs, and much
+/// smaller to keep.
+fn calls_of(mir: &str, names: &HashSet<String>) -> String {
+    let mut calls = String::new();
+    for line in mir.lines().filter(|line| names.iter().any(|name| line.contains(name.as_str()))) {
+        calls.push_str(line);
+        calls.push('\n');
+    }
+    calls
+}
+
+/// The calls saved by the last build, if they were saved under `key`.
+fn read_saved(path: &Path, key: &str) -> Option<String> {
+    let text = fs::read_to_string(path).ok()?;
+    let (saved_key, calls) = text.split_once('\n')?;
+    (saved_key == key).then(|| calls.to_owned())
 }
 
 /// Reads and parses the module tree, plus files a build script generated that the crate includes.
@@ -278,4 +434,117 @@ pub fn normalize(path: &Path) -> PathBuf {
         }
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+
+    use super::*;
+
+    const MAIN: &str = "mod util;\n\
+        fn main() { let mut v = vec![5i64]; util::clamp_all(&mut v, 0, 9); report(); }\n\
+        fn report() { println!(\"one\"); }\n";
+    const UTIL: &str = "pub fn clamp_all<T: PartialOrd + Copy>(values: &mut [T], lo: T, hi: T) {\n\
+        for v in values { if *v < lo { *v = lo } else if *v > hi { *v = hi } }\n}\n\
+        pub struct Cache<V> { pub value: Option<V> }\n\
+        impl<V: Clone> Cache<V> { pub fn peek(&self) -> Option<V> { self.value.clone() } }\n";
+    const MIR: &str = "fn main() -> () {\n\
+        _1 = clamp_all::<i64>(move _2, const 0_i64, const 9_i64) -> [return: bb1];\n\
+        _3 = report() -> [return: bb2];\n}\n";
+
+    struct Crate {
+        dir: PathBuf,
+        mir_runs: Cell<usize>,
+    }
+
+    impl Crate {
+        fn new(name: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!("scry-rewrite-{name}-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&dir);
+            fs::create_dir_all(dir.join("src")).unwrap();
+            fs::write(dir.join("src/main.rs"), MAIN).unwrap();
+            fs::write(dir.join("src/util.rs"), UTIL).unwrap();
+            Self { dir, mir_runs: Cell::new(0) }
+        }
+
+        fn edit(&self, file: &str, from: &str, to: &str) {
+            let path = self.dir.join("src").join(file);
+            let text = fs::read_to_string(&path).unwrap();
+            assert!(text.contains(from), "{from}");
+            fs::write(&path, text.replace(from, to)).unwrap();
+        }
+
+        /// Rewrites the crate, returning whether the generic instantiations were reused and the report.
+        fn rewrite(&self, config: Config, fresh_generics: bool) -> (bool, String) {
+            let mirror = self.dir.join("target/scry-src/demo");
+            let paths = Paths { manifest_dir: &self.dir, mirror_root: &mirror, out_dir: None };
+            let options = Options {
+                dioxus: false,
+                executable: true,
+                crate_name: "demo".into(),
+                config,
+                hook_points: true,
+                fresh_generics,
+                generics_seed: "rustc --edition 2024".into(),
+            };
+            let mir = || {
+                self.mir_runs.set(self.mir_runs.get() + 1);
+                Ok(MIR.to_owned())
+            };
+            let output = rewrite_crate(&self.dir.join("src/main.rs"), &paths, &options, &mir).unwrap();
+            (output.generics_reused, fs::read_to_string(mirror.join("scry-report.txt")).unwrap())
+        }
+    }
+
+    impl Drop for Crate {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    #[test]
+    fn generic_instantiations_are_found_again_only_when_generic_code_or_its_users_change() {
+        let krate = Crate::new("generics");
+        let (reused, report) = krate.rewrite(Config::default(), false);
+        assert!(!reused);
+        assert_eq!(krate.mir_runs.get(), 1);
+        assert!(report.contains("clamp_all::<i64>"), "{report}");
+
+        let (reused, report) = krate.rewrite(Config::default(), false);
+        assert!(reused, "nothing changed");
+        assert_eq!(krate.mir_runs.get(), 1);
+        assert!(report.contains("clamp_all::<i64>"), "the saved instantiations are used: {report}");
+
+        krate.edit("main.rs", "println!(\"one\")", "println!(\"two\") /* reworded */");
+        krate.edit("util.rs", "pub value", "// The cached value.\n    pub value");
+        assert!(krate.rewrite(Config::default(), false).0, "code without generics, and comments, changed");
+
+        krate.edit("main.rs", "clamp_all(&mut v, 0, 9)", "clamp_all(&mut v, 1, 9)");
+        assert!(!krate.rewrite(Config::default(), false).0, "a call of a generic function changed");
+        assert_eq!(krate.mir_runs.get(), 2);
+
+        krate.edit("main.rs", "report(); }", "report(); let _ = cache.peek(); }");
+        assert!(!krate.rewrite(Config::default(), false).0, "a method of a generic type is called");
+        krate.edit("util.rs", "*v = hi", "*v = hi;");
+        assert!(!krate.rewrite(Config::default(), false).0, "a generic function changed");
+        assert_eq!(krate.mir_runs.get(), 4);
+
+        assert!(!krate.rewrite(Config::default(), true).0, "a fresh search was asked for");
+        assert_eq!(krate.mir_runs.get(), 5);
+    }
+
+    #[test]
+    fn generic_instantiations_can_be_turned_off() {
+        let krate = Crate::new("no-generics");
+        let mut config = Config::default();
+        config.generics = false;
+        let (reused, report) = krate.rewrite(config, false);
+        assert!(!reused);
+        assert_eq!(krate.mir_runs.get(), 0, "no MIR pass");
+        assert!(report.contains("generic instantiations: off"), "{report}");
+        assert!(!report.contains("clamp_all::<i64>"), "{report}");
+        assert!(report.contains("fn clamp_all: skipped, generic, and generics are off"), "{report}");
+        assert!(report.contains("impl Cache<V>: skipped, generic, and generics are off"), "{report}");
+    }
 }

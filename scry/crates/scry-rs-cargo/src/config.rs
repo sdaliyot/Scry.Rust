@@ -18,6 +18,14 @@
 //! and a hook point (by default a function under an unknown attribute macro gets neither). A name
 //! matches an attribute's last path segment or its whole path. The workspace's list and the
 //! crate's are combined.
+//!
+//! ```toml
+//! [package.metadata.scry.generics]     # or [workspace.metadata.scry.generics]
+//! enabled = false                      # default true
+//! ```
+//!
+//! turns off the search for the instantiations of generic functions and types, a second compile of
+//! the crate to MIR. Generic functions and types then get no call shims.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -25,6 +33,8 @@ use std::path::{Path, PathBuf};
 #[derive(Debug)]
 pub struct Config {
     pub hooks: bool,
+    /// Find the instantiations of generic functions and types; see the module docs.
+    pub generics: bool,
     hook_exclude: Vec<Vec<String>>,
     /// Attribute macros that leave a function as written; see the module docs.
     pub transparent: Vec<String>,
@@ -34,7 +44,7 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
-        Self { hooks: true, hook_exclude: Vec::new(), transparent: Vec::new(), manifests: Vec::new() }
+        Self { hooks: true, generics: true, hook_exclude: Vec::new(), transparent: Vec::new(), manifests: Vec::new() }
     }
 }
 
@@ -80,6 +90,16 @@ impl Config {
                 if !self.transparent.contains(&name) {
                     self.transparent.push(name);
                 }
+            }
+        }
+        if let Some(generics) = scry.and_then(|scry| scry.get("generics")) {
+            let place = format!("{} [{}.generics]", manifest.display(), keys[..keys.len() - 1].join("."));
+            let generics = generics.as_table().ok_or_else(|| format!("{place}: must be a table"))?;
+            if let Some(enabled) = generics.get("enabled") {
+                self.generics = enabled.as_bool().ok_or_else(|| format!("{place}: `enabled` must be true or false"))?;
+            }
+            if let Some(key) = generics.keys().find(|key| *key != "enabled") {
+                return Err(format!("{place}: unknown key `{key}`"));
             }
         }
         let Some(hooks) = value else { return Ok(()) };
@@ -191,6 +211,31 @@ mod tests {
         fs::write(member.join("Cargo.toml"), "[package]\nname = \"m\"\n[package.metadata.scry.hooks]\nenable = true\n")
             .unwrap();
         assert!(Config::load(&member).unwrap_err().contains("unknown key `enable`"));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn generics_can_be_turned_off_for_the_workspace_or_a_package() {
+        let dir = std::env::temp_dir().join(format!("scry-config-generics-{}", std::process::id()));
+        let member = dir.join("member");
+        fs::create_dir_all(&member).unwrap();
+        let package = |table: &str| {
+            fs::write(member.join("Cargo.toml"), format!("[package]\nname = \"m\"\n{table}")).unwrap();
+        };
+        fs::write(dir.join("Cargo.toml"), "[workspace]\n").unwrap();
+        package("");
+        assert!(Config::load(&member).unwrap().generics, "on by default");
+
+        fs::write(dir.join("Cargo.toml"), "[workspace]\n[workspace.metadata.scry.generics]\nenabled = false\n")
+            .unwrap();
+        assert!(!Config::load(&member).unwrap().generics);
+        package("[package.metadata.scry.generics]\nenabled = true\n");
+        assert!(Config::load(&member).unwrap().generics, "the package's own `enabled` wins");
+
+        package("[package.metadata.scry.generics]\nenabled = \"no\"\n");
+        assert!(Config::load(&member).unwrap_err().contains("`enabled` must be true or false"));
+        package("[package.metadata.scry.generics]\nskip = true\n");
+        assert!(Config::load(&member).unwrap_err().contains("unknown key `skip`"));
         fs::remove_dir_all(&dir).unwrap();
     }
 }
