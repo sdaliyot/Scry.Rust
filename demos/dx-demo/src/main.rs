@@ -6,7 +6,8 @@
 //! Ordinary signals belong to the UI thread, so an endpoint running on another thread will have to
 //! marshal onto it to read or write them - the Rust equivalent of Scry.NET's WPF/WinForms adapters.
 //! It also has a router with a few pages, to switch between from outside (`scry set ui.route ...`),
-//! and opens a second window (About, "Open a notes window") for `scry windows`.
+//! and opens a second window (About, "Open a notes window") for `scry windows`. About also loads the
+//! board's stats with `use_resource` and clears finished tasks with `use_action`.
 
 mod model;
 
@@ -131,9 +132,33 @@ fn TaskDetail(id: u32) -> Element {
 
 #[component]
 fn About() -> Element {
+    let mut board = use_context::<Signal<Board>>();
+    // Loaded in the background, and again whenever the board changes.
+    let stats = use_resource(move || async move {
+        let summary = board.read().summary();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        summary
+    });
+    // Runs only when asked to.
+    let mut clear_done = use_action(move || async move {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        Ok::<usize, dioxus::CapturedError>(board.write().clear_done())
+    });
     rsx! {
         Nav {}
         p { "A Dioxus desktop app for Scry.Rust to attach to." }
+        p {
+            match &*stats.read() {
+                Some(summary) => rsx! { "Board: {summary}" },
+                None => rsx! { "Loading the board's stats…" },
+            }
+        }
+        button { onclick: move |_| { clear_done.call(); }, "Clear finished tasks" }
+        if clear_done.pending() {
+            span { " clearing…" }
+        } else if let Some(Ok(removed)) = clear_done.value() {
+            span { " cleared {removed}" }
+        }
         button {
             onclick: move |_| {
                 dioxus::desktop::window().new_window(VirtualDom::new(Notes), dioxus::desktop::Config::new());

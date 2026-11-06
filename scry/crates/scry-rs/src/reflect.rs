@@ -123,6 +123,19 @@ pub trait Reflect {
         None
     }
 
+    /// Methods Scry itself offers on this value, by signature: a library handle's operations that
+    /// the app's own code reaches through methods the generator can't make callable (a Dioxus
+    /// resource's `restart`). `scry call <path>.<name>` runs them through [`Reflect::call_builtin`].
+    fn builtin_methods(&self) -> Vec<&'static str> {
+        Vec::new()
+    }
+
+    /// Runs the built-in method `name`; `None` when this value has no such method.
+    fn call_builtin(&self, name: &str, args: &[Value]) -> Option<Result<Value, Error>> {
+        let _ = (name, args);
+        None
+    }
+
     /// A new value built from JSON, for when there is none to assign into yet - an `Option` that is
     /// `None`. Given for std scalars and strings, and by `#[derive(Reflect)]` for types without
     /// generic parameters.

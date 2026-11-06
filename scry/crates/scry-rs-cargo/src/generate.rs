@@ -40,7 +40,15 @@ use crate::hookpoints;
 use crate::tokens;
 
 /// Hooks whose result is a state handle worth tracking.
-const STATE_HOOKS: &[&str] = &["use_signal", "use_signal_sync", "use_context_provider", "use_memo"];
+const STATE_HOOKS: &[&str] = &[
+    "use_signal",
+    "use_signal_sync",
+    "use_context_provider",
+    "use_root_context",
+    "use_memo",
+    "use_resource",
+    "use_action",
+];
 
 const DERIVE: &str = "#[derive(::scry::Reflect)] ";
 
@@ -1232,6 +1240,19 @@ fn f() { const B: u8 = 3; }
         assert!(report.contains("hook App.count (use_signal)"));
         assert_eq!(report.matches("hook").count(), 1);
         assert_eq!(rewrite(text, false).0, text);
+    }
+
+    #[test]
+    fn tracks_resources_actions_and_root_contexts() {
+        let text = "fn Page() { let stats = use_resource(move || load());\n\
+                    let mut save = use_action(move || store());\n\
+                    let theme = use_root_context(|| Theme::Dark);\n\
+                    let later = use_server_future(load)?; }\n";
+        let (_, report) = rewrite(text, true);
+        for hook in ["Page.stats (use_resource)", "Page.save (use_action)", "Page.theme (use_root_context)"] {
+            assert!(report.contains(&format!("hook {hook}")), "{report}");
+        }
+        assert!(!report.contains("later"), "a hook behind `?` holds no handle until it resolves");
     }
 
     #[test]

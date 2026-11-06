@@ -52,6 +52,13 @@ impl Board {
         &self.tasks
     }
 
+    /// Removes the finished tasks and returns how many there were.
+    pub fn clear_done(&mut self) -> usize {
+        let before = self.tasks.len();
+        self.tasks.retain(|task| !task.done);
+        before - self.tasks.len()
+    }
+
     pub fn summary(&self) -> String {
         let done = count_where(&self.tasks, |task| task.done);
         let open = self.tasks.len() - done;

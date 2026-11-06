@@ -88,10 +88,12 @@ pub(crate) fn list(filter: &str) -> Value {
 
 /// The signatures of the methods callable on `value`.
 pub(crate) fn methods_of(value: &dyn Reflect) -> Vec<&'static str> {
-    let Some(type_id) = value.as_any().map(|value| value.type_id()) else { return Vec::new() };
+    let mut signatures = value.builtin_methods();
+    let Some(type_id) = value.as_any().map(|value| value.type_id()) else { return signatures };
     let mut methods: Vec<&Function> = methods(type_id).collect();
     methods.sort_by_key(|function| function.name);
-    methods.iter().map(|function| function.signature).collect()
+    signatures.extend(methods.iter().map(|function| function.signature));
+    signatures
 }
 
 fn methods(type_id: TypeId) -> impl Iterator<Item = &'static Function> {
@@ -147,6 +149,9 @@ pub(crate) fn method_names() -> Vec<(&'static str, usize)> {
         .filter(|function| function.receiver != Receiver::None)
         .map(|function| (function.name, function.arity))
         .collect();
+    // The built-in methods of library handles; see `Reflect::builtin_methods`.
+    #[cfg(feature = "dioxus")]
+    names.extend(["restart", "cancel", "pause", "resume", "clear", "reset", "call"].map(|name| (name, 0)));
     names.sort_unstable();
     names.dedup();
     names
@@ -193,10 +198,15 @@ impl Registry {
         depth: usize,
     ) -> Result<Value, Error> {
         let mut found = None;
+        let mut builtin = None;
         self.read_at(root, segments, &mut |value| {
+            builtin = value.call_builtin(method, args);
             found = Some((value.as_any().map(|value| value.type_id()), value.type_name()));
             Ok(())
         })?;
+        if let Some(result) = builtin {
+            return result;
+        }
         let Some((type_id, type_name)) = found else {
             return Err(Error::NoSuchMethod { type_name: "?", method: method.into() });
         };

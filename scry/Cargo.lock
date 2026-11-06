@@ -1017,6 +1017,7 @@ version = "0.1.0"
 dependencies = [
  "dioxus-core",
  "dioxus-document",
+ "dioxus-hooks",
  "dioxus-router",
  "dioxus-signals",
  "futures-channel",

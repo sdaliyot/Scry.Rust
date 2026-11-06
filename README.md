@@ -119,6 +119,24 @@ Dioxus's dev-build toast is, don't match and are left out of `text`. These comma
 asynchronously on the UI thread, so the app keeps handling events while one waits. They aren't
 available inside `eval` scripts.
 
+### Resources and actions
+
+`use_resource` and `use_action` handles are tracked like signals, read-only, with the operations the
+app's own code would call on them:
+
+```powershell
+scry get ui.About.stats                   # {state: "Ready", value: ...}; state is Pending, Ready, Paused or Stopped
+scry call ui.About.stats.restart          # runs the future again; also cancel, pause, resume, clear
+scry get ui.About.clear_done              # {pending: false, value: 1}, or value {error: ...} after a failure
+scry call ui.About.clear_done.call        # runs an action whose closure takes no arguments
+scry call ui.About.clear_done.reset       # forgets the last value; cancel stops a run in progress
+```
+
+`ls` lists these under `methods`. In a script they are methods too (`ui.About.stats.restart()`),
+except `call`, which a script runs as `ui.About.clear_done.invoke("call")`. A `call` only starts the
+action; read `pending` and `value` to see it finish. An action that takes arguments can't be run
+from Scry. `use_server_future(...)?` isn't tracked: until it resolves it holds no handle.
+
 ### Several windows
 
 A Dioxus desktop app can open more windows (`window().new_window(VirtualDom::new(Notes), cfg)`),
@@ -462,7 +480,7 @@ every line where it was, so errors, panics and the debugger still point at the o
   would change nothing the app uses. Associated consts (`impl X { const N: u8 = 1; }`) aren't
   registered.
 - reflection through `Box<dyn Trait>` for every trait that can be used as `dyn Trait`
-- for Dioxus crates, tracking of `use_signal`/`use_signal_sync`/`use_context_provider`/`use_memo` results under `ui.<Component>.<binding>`
+- for Dioxus crates, tracking of `use_signal`/`use_signal_sync`/`use_context_provider`/`use_root_context`/`use_memo`/`use_resource`/`use_action` results under `ui.<Component>.<binding>`
 - a call shim for every callable function and method (see above)
 - a hook point in every hookable function (see above)
 - the endpoint, started at the top of `main`. For Dioxus, it is pumped from each root component the
