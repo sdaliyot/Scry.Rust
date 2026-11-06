@@ -1,7 +1,9 @@
 //! The extra `--features` a `cargo scry` build turns on, from `cargo metadata`:
 //!
-//! - scry-rs's optional support for tokio (`scry/tokio`) and the Dioxus router (`scry/dioxus-router`)
-//!   when that crate is in the dependency graph.
+//! - scry-rs's optional support for tokio (`scry/tokio`), the Dioxus router (`scry/dioxus-router`)
+//!   and Dioxus desktop windows (`scry/dioxus-desktop`) when that crate is in the dependency graph;
+//!   the desktop one not for a wasm build, where the graph may list dioxus-desktop for another
+//!   platform but it cannot compile.
 //! - The serde feature of each direct dependency that has one (`uuid/serde`, `chrono/serde`), so
 //!   its types are read and written as values rather than shown through `Debug`. Serde features
 //!   only add impls, so this changes what Scry sees, not what the app does; and it applies to
@@ -28,8 +30,10 @@ use serde_json::Value;
 /// `args`, run in `cwd`.
 pub fn extra(metadata: &Value, args: &[OsString], cwd: &Path) -> Result<Vec<String>, String> {
     let packages = metadata["packages"].as_array().map(Vec::as_slice).unwrap_or_default();
-    let mut features: Vec<String> = ["tokio", "dioxus-router"]
+    let wasm = args.iter().any(|arg| arg.to_string_lossy().contains("wasm32"));
+    let mut features: Vec<String> = ["tokio", "dioxus-router", "dioxus-desktop"]
         .into_iter()
+        .filter(|name| !(wasm && *name == "dioxus-desktop"))
         .filter(|name| packages.iter().any(|package| package["name"] == *name))
         .map(|name| format!("scry/{name}"))
         .collect();
@@ -260,6 +264,14 @@ mod tests {
         let routed = json!({ "packages": [{ "id": "dioxus-router", "name": "dioxus-router", "features": {} }] });
         assert_eq!(extra(&routed, &args("build"), Path::new("/none")).unwrap(), ["scry/dioxus-router"]);
         assert!(extra(&json!({ "packages": [] }), &args("build"), Path::new("/none")).unwrap().is_empty());
+    }
+
+    #[test]
+    fn turns_on_desktop_support_except_for_wasm() {
+        let desktop = json!({ "packages": [{ "id": "dioxus-desktop", "name": "dioxus-desktop", "features": {} }] });
+        assert_eq!(extra(&desktop, &args("build"), Path::new("/none")).unwrap(), ["scry/dioxus-desktop"]);
+        let wasm = args("build --target wasm32-unknown-unknown");
+        assert!(extra(&desktop, &wasm, Path::new("/none")).unwrap().is_empty());
     }
 
     #[test]

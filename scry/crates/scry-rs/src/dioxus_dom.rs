@@ -166,7 +166,7 @@ fn argument<'a>(rest: &'a str, what: &str) -> Result<(String, &'a str), Error> {
 
 /// A command's only argument: a JSON string, or the rest of the line as it is, spaces and all
 /// (`click li:nth-child(2) input`, `click text=Save changes`).
-fn whole_argument(rest: &str, what: &str) -> Result<String, Error> {
+pub(crate) fn whole_argument(rest: &str, what: &str) -> Result<String, Error> {
     if rest.is_empty() {
         return Err(Error::BadCommand(format!("expected {what}")));
     }
@@ -194,24 +194,52 @@ pub(crate) fn start(script: &str) -> dioxus_document::Eval {
 
 /// Waits for a script's answer.
 pub(crate) async fn finish(eval: dioxus_document::Eval) -> Result<Value, Error> {
+    match within_timeout(eval.into_future()).await? {
+        Ok(Value::Object(object)) if object.len() == 1 && object.contains_key(ERROR_KEY) => {
+            Err(Error::Script(object[ERROR_KEY].as_str().unwrap_or_default().to_owned()))
+        }
+        Ok(value) => Ok(value),
+        // What a page that went away while running the script - a click that closed its window -
+        // reports.
+        Err(dioxus_document::EvalError::Finished) => {
+            Err(Error::Script("the page went away before it answered (its window closed?)".into()))
+        }
+        Err(error) => Err(Error::Script(error.to_string())),
+    }
+}
+
+/// `future`'s output, or a timeout error if the page takes longer than [`TIMEOUT`] to answer.
+pub(crate) async fn within_timeout<F: std::future::Future>(future: F) -> Result<F::Output, Error> {
     let (sender, timeout) = futures_channel::oneshot::channel::<()>();
     std::thread::spawn(move || {
         std::thread::sleep(TIMEOUT);
         let _ = sender.send(());
     });
-    match select(eval.into_future(), timeout).await {
-        Either::Left((Ok(Value::Object(object)), _)) if object.len() == 1 && object.contains_key(ERROR_KEY) => {
-            Err(Error::Script(object[ERROR_KEY].as_str().unwrap_or_default().to_owned()))
-        }
-        Either::Left((Ok(value), _)) => Ok(value),
-        // What a page that went away while running the script - a click that closed its window -
-        // reports.
-        Either::Left((Err(dioxus_document::EvalError::Finished), _)) => {
-            Err(Error::Script("the page went away before it answered (its window closed?)".into()))
-        }
-        Either::Left((Err(error), _)) => Err(Error::Script(error.to_string())),
+    match select(std::pin::pin!(future), timeout).await {
+        Either::Left((output, _)) => Ok(output),
         Either::Right(_) => Err(Error::Timeout(format!("the page did not answer within {}s", TIMEOUT.as_secs_f32()))),
     }
+}
+
+/// A script that returns the window's viewport as a box in page coordinates, like [`rect_script`].
+pub(crate) fn viewport_script() -> String {
+    wrap(
+        "return { x: window.scrollX, y: window.scrollY, width: window.innerWidth, height: window.innerHeight,          inside: true };",
+    )
+}
+
+/// A script that finds the element `selector` names, scrolls it into view within its scrolling
+/// containers (as `click` does), and returns its box in page coordinates (CSS pixels), whether it
+/// lies inside the window's viewport, and what it is: `{x, y, width, height, inside, element}`.
+pub(crate) fn rect_script(selector: &str) -> String {
+    wrap(&format!(
+        "const el = __scry.get({}); el.scrollIntoView({{ block: \"nearest\" }}); \
+         const r = el.getBoundingClientRect(); \
+         return {{ x: r.left + window.scrollX, y: r.top + window.scrollY, width: r.width, height: r.height, \
+         inside: r.top >= 0 && r.left >= 0 && r.bottom <= window.innerHeight && r.right <= window.innerWidth, \
+         element: __scry.describe(el) }};",
+        quote(selector)
+    ))
 }
 
 #[cfg(test)]

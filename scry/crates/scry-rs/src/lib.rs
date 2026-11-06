@@ -52,6 +52,8 @@ pub mod dioxus_hooks;
 mod dioxus_impls;
 #[cfg(feature = "dioxus-router")]
 mod dioxus_router;
+#[cfg(feature = "dioxus-desktop")]
+mod dioxus_screenshot;
 
 #[doc(hidden)]
 pub mod __private;

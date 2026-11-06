@@ -3,6 +3,7 @@
 //! ```text
 //! scry list                                  running targets, as JSON
 //! scry [--pid N | --process NAME] <command>  run a registry command in one of them
+//! scry --out shot.png screenshot [selector]   save a Dioxus app's screenshot as a PNG file
 //! ```
 //!
 //! A command is what the registry understands - `roots`, `ls <path>`, `get <path> [depth]`,
@@ -24,7 +25,7 @@ use std::time::Duration;
 use serde_json::{Value, json};
 
 const USAGE: &str = "usage: scry list
-       scry [--pid N | --process NAME] <command>
+       scry [--pid N | --process NAME] [--out FILE] <command>
 
 commands: roots | ls <path> | get <path> [depth] | set <path> <json> | help
           call <function or path.method> [json args...] | fns [filter]
@@ -36,6 +37,7 @@ commands: roots | ls <path> | get <path> [depth] | set <path> <json> | help
           hook remove <id> | hook clear
           js <code> | click <selector> | type <selector> <text> | text [selector]
                                        (a Dioxus app's page; selector: CSS, or text=Label)
+          screenshot [selector]          (a Dioxus desktop app's page, as a PNG; --out FILE saves it)
           windows | window <n> <command>   (a Dioxus app's other windows)";
 
 /// Must match `scry::endpoint::targets_dir`.
@@ -107,6 +109,7 @@ fn main() -> ExitCode {
     let mut args: Vec<String> = env::args().skip(1).collect();
     let mut pid = None;
     let mut process = None;
+    let mut out = None;
     while let Some(flag) = args.first().cloned() {
         match flag.as_str() {
             "--pid" if args.len() > 1 => {
@@ -118,6 +121,10 @@ fn main() -> ExitCode {
             }
             "--process" if args.len() > 1 => {
                 process = Some(args[1].clone());
+                args.drain(..2);
+            }
+            "--out" if args.len() > 1 => {
+                out = Some(PathBuf::from(&args[1]));
                 args.drain(..2);
             }
             "-h" | "--help" => {
@@ -160,7 +167,12 @@ fn main() -> ExitCode {
     };
 
     match send(target, &command) {
-        Ok(reply) => {
+        Ok(mut reply) => {
+            if let Some(out) = &out
+                && let Err(error) = save_image(&mut reply, out)
+            {
+                return fail("output_failed", &error);
+            }
             println!("{reply}");
             if reply["ok"] == true { ExitCode::SUCCESS } else { ExitCode::FAILURE }
         }
@@ -195,6 +207,50 @@ fn send(target: &Target, command: &str) -> Result<Value, String> {
     let mut line = String::new();
     BufReader::new(stream).read_line(&mut line).map_err(|error| error.to_string())?;
     serde_json::from_str(&line).map_err(|error| format!("unreadable reply: {error}"))
+}
+
+/// `--out`: writes the reply's image (`base64Data`, as `screenshot` answers) to `path`, and puts
+/// the file's path in the reply in its place.
+fn save_image(reply: &mut Value, path: &PathBuf) -> Result<(), String> {
+    if reply["ok"] != true {
+        return Ok(());
+    }
+    let result = &mut reply["result"];
+    let data = result["base64Data"].as_str().ok_or("--out saves an image, and the reply has none")?;
+    let bytes = decode_base64(data).ok_or("the image is not valid base64")?;
+    fs::write(path, &bytes).map_err(|error| format!("cannot write {}: {error}", path.display()))?;
+    let saved = fs::canonicalize(path).unwrap_or_else(|_| path.clone());
+    // Without Windows' verbatim prefix (`\\?\C:\...`), which canonicalize adds.
+    let saved = saved.display().to_string();
+    let saved = saved.strip_prefix(r"\\?\").unwrap_or(&saved);
+    if let Some(result) = result.as_object_mut() {
+        result.remove("base64Data");
+        result.insert("file".into(), Value::String(saved.to_owned()));
+        result.insert("bytes".into(), Value::from(bytes.len()));
+    }
+    Ok(())
+}
+
+fn decode_base64(text: &str) -> Option<Vec<u8>> {
+    let mut bytes = Vec::with_capacity(text.len() / 4 * 3);
+    let (mut bits, mut count) = (0u32, 0);
+    for c in text.bytes().filter(|c| *c != b'=') {
+        let value = match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            _ => return None,
+        };
+        bits = (bits << 6) | u32::from(value);
+        count += 6;
+        if count >= 8 {
+            count -= 8;
+            bytes.push((bits >> count) as u8);
+        }
+    }
+    Some(bytes)
 }
 
 fn fail(code: &str, message: &str) -> ExitCode {

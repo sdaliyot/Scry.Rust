@@ -122,6 +122,13 @@ async fn answer(registry: &crate::Registry, command: &str) -> Value {
     if command.trim() == "windows" {
         return reply(Ok(list_windows()));
     }
+    #[cfg(feature = "dioxus-desktop")]
+    if let Some(capture) = crate::dioxus_screenshot::parse(command) {
+        return reply(match capture {
+            Ok(capture) => screenshot(capture, &within).await,
+            Err(error) => Err(error),
+        });
+    }
     match crate::dioxus_dom::script(command) {
         Some(Ok(script)) => {
             let mut eval = None;
@@ -138,6 +145,30 @@ async fn answer(registry: &crate::Registry, command: &str) -> Value {
             answer
         }
     }
+}
+
+/// `screenshot [selector]`: finds the element's box through the page, then has the webview render it.
+#[cfg(feature = "dioxus-desktop")]
+async fn screenshot(
+    capture: crate::dioxus_screenshot::Capture,
+    within: &dyn Fn(&mut dyn FnMut()),
+) -> Result<Value, Error> {
+    use crate::dioxus_screenshot::{Capture, Clip};
+    let gone = || Error::BadCommand("the window is gone".into());
+    // The page too is captured by its box, the viewport: a capture without one waits for a frame
+    // that a minimized window never draws.
+    let script = match &capture {
+        Capture::Page => crate::dioxus_dom::viewport_script(),
+        Capture::Element(selector) => crate::dioxus_dom::rect_script(selector),
+    };
+    let mut eval = None;
+    within(&mut || eval = Some(crate::dioxus_dom::start(&script)));
+    let rect = crate::dioxus_dom::finish(eval.ok_or_else(gone)?).await?;
+    let clip = Clip::from_rect(&rect)?;
+    let element = matches!(capture, Capture::Element(_)).then(|| rect["element"].clone());
+    let mut pending = None;
+    within(&mut || pending = Some(crate::dioxus_screenshot::start(&clip)));
+    pending.ok_or_else(gone)??.finish(element).await
 }
 
 // ---- Windows ----

@@ -122,6 +122,34 @@ Dioxus's dev-build toast is, don't match and are left out of `text`. These comma
 asynchronously on the UI thread, so the app keeps handling events while one waits. They aren't
 available inside `eval` scripts.
 
+### Screenshots
+
+`screenshot` returns what a Dioxus desktop window shows, as a PNG: the visible page, or one
+element, named by a selector as for `click`.
+
+```powershell
+scry --out page.png screenshot                    # the window's viewport
+scry --out list.png screenshot ul                 # one element, at its own size
+scry --out row.png screenshot "text=Build the demos"
+scry --out notes.png window 1 screenshot          # another window
+```
+
+The reply is `{format: "png", width, height, base64Data}`, plus `element` for a selector. `--out`
+writes the image to a file and replies with its path (`file`) instead of the data.
+
+Nothing is read off the screen. The webview's engine renders the page for the capture, through
+the DevTools protocol's `Page.captureScreenshot` in WebView2. Windows over the app, the window's
+place on the desktop, and whether a display is attached don't change the result.
+- **Minimized windows:** a minimized window works too. Chromium stops drawing a minimized
+  window's page, so Scry briefly hides and shows the webview again to get a fresh frame. The page
+  sees `visibilitychange` events when that happens.
+- **Elements past the window's edge:** an element is first scrolled into view within its scrolling
+  containers, as for `click`. One larger than the window is rendered in full beyond it.
+
+`cargo scry` turns this on (`scry-rs`'s `dioxus-desktop` feature) for an app that depends on
+`dioxus-desktop`. It is Windows only for now: macOS (WKWebView) and Linux (WebKitGTK) have
+snapshot APIs of their own that aren't wired up yet.
+
 ### Errors on the page
 
 A component error - a route that doesn't parse (`/tasks/abc` for `/tasks/:id` with a number), an

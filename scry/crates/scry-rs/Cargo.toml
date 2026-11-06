@@ -23,6 +23,8 @@ script = ["dep:rhai"]
 dioxus = ["dep:dioxus-signals", "dep:dioxus-core", "dep:dioxus-document", "dep:dioxus-hooks", "dep:futures-channel", "dep:futures-util"]
 # `ui.route` and `ui.routes`: the app's router. `cargo scry` turns this on for an app that depends on dioxus-router.
 dioxus-router = ["dioxus", "dep:dioxus-router"]
+# `screenshot`: the page as the webview renders it. `cargo scry` turns this on for an app that depends on dioxus-desktop.
+dioxus-desktop = ["dioxus", "dep:dioxus-desktop", "dep:webview2-com", "dep:windows-core"]
 
 [dependencies]
 scry-rs-derive = { path = "../scry-rs-derive" }
@@ -43,8 +45,15 @@ dioxus-document = { version = "0.7", optional = true }
 # Resources and actions (`use_resource`, `use_action`).
 dioxus-hooks = { version = "0.7", optional = true }
 dioxus-router = { version = "0.7", optional = true }
+# The app's webview. Only the features it needs to compile: the app's own choice applies.
+dioxus-desktop = { version = "0.7", optional = true, default-features = false, features = ["tokio_runtime"] }
 futures-channel = { version = "0.3", optional = true }
 futures-util = { version = "0.3", optional = true, default-features = false }
+
+# `screenshot` on Windows: the DevTools protocol of the WebView2 wry runs on (the versions wry 0.53 uses).
+[target.'cfg(windows)'.dependencies]
+webview2-com = { version = "0.38", optional = true }
+windows-core = { version = "0.61", optional = true }
 
 [dev-dependencies]
 serde_json.workspace = true
