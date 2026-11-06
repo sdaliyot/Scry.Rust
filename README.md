@@ -395,6 +395,12 @@ every line where it was, so errors, panics and the debugger still point at the o
 - `#[derive(Reflect)]` on every struct and enum, including types defined by the crate's own `macro_rules!`
 - a registration for every non-`mut` static, by its full path (`console_demo::APP`, also reachable as `APP`).
   A `#[cfg]` on the static is copied to its registration.
+- a read-only registration for every named `const` (`SAMPLE`, `const _` excluded), marked
+  `"const": true` in `scry roots`. A const has no address: each use gets its own copy, built into the
+  program. The registration evaluates it once into a copy that can be read like a static, but every
+  write is refused with `not_writable`, even through a `Mutex` inside it, since changing the copy
+  would change nothing the app uses. Associated consts (`impl X { const N: u8 = 1; }`) aren't
+  registered.
 - reflection through `Box<dyn Trait>` for every trait that can be used as `dyn Trait`
 - for Dioxus crates, tracking of `use_signal`/`use_signal_sync`/`use_context_provider`/`use_memo` results under `ui.<Component>.<binding>`
 - a call shim for every callable function and method (see above)

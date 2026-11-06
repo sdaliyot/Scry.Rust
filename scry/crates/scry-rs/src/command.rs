@@ -59,7 +59,14 @@ fn run(registry: &Registry, line: &str, output: &mut Vec<String>) -> Result<Valu
             registry
                 .roots()
                 .into_iter()
-                .map(|root| json!({ "name": root.name, "type": crate::reflect::short_type_name(root.type_name) }))
+                .map(|root| {
+                    let mut entry =
+                        json!({ "name": root.name, "type": crate::reflect::short_type_name(root.type_name) });
+                    if registry.is_const(&root.name) {
+                        entry["const"] = json!(true);
+                    }
+                    entry
+                })
                 .collect::<Vec<_>>()
         )),
         "ls" => registry.describe(required(rest, "a path")?),

@@ -22,6 +22,9 @@ enum Root {
     Static(&'static dyn Reflect),
     /// A generated static, whose type may not implement `Reflect` at all.
     Field(FieldRef<'static>),
+    /// A generated `const`: a copy of its value, read-only since changing the copy changes nothing
+    /// in the app, where every use of a const has its own copy.
+    Const(FieldRef<'static>),
 }
 
 impl Root {
@@ -29,7 +32,7 @@ impl Root {
         match self {
             Root::Owned(value) => value.as_ref(),
             Root::Static(value) => *value,
-            Root::Field(value) => value.get(),
+            Root::Field(value) | Root::Const(value) => value.get(),
         }
     }
 }
@@ -59,6 +62,11 @@ impl Registry {
     #[doc(hidden)]
     pub fn __add_field(&mut self, name: &str, root: FieldRef<'static>) {
         self.insert(name.to_owned(), Root::Field(root));
+    }
+
+    #[doc(hidden)]
+    pub fn __add_const(&mut self, name: &str, root: FieldRef<'static>) {
+        self.insert(name.to_owned(), Root::Const(root));
     }
 
     /// Adds a root the registry owns: an `Arc` to shared state, a signal handle. Replaces any
@@ -94,6 +102,21 @@ impl Registry {
         self.roots.iter().map(|(name, root)| Member::new(name.clone(), root.get().type_name())).collect()
     }
 
+    /// Whether the root `root` refers to is a `const`, which can be read but not changed.
+    pub fn is_const(&self, root: &str) -> bool {
+        self.find(root).is_ok_and(|(_, root)| matches!(root, Root::Const(_)))
+    }
+
+    /// The root `root` refers to, for writing: an error for a const.
+    fn writable(&self, root: &str) -> Result<&Root, Error> {
+        match self.find(root)? {
+            (name, Root::Const(_)) => Err(Error::not_writable(format!(
+                "{name} is a const; every use of a const has its own copy of the value, built into the program, so it can't be changed"
+            ))),
+            (_, root) => Ok(root),
+        }
+    }
+
     fn resolve(&self, path: &str) -> Result<(&dyn Reflect, Vec<Segment>), Error> {
         let (root, segments) = parse(path)?;
         Ok((self.find(&root)?.1.get(), segments))
@@ -114,12 +137,12 @@ impl Registry {
     /// Assigns `value` to what `segments` below `root` resolve to.
     #[cfg_attr(not(feature = "script"), allow(dead_code))]
     pub(crate) fn set_at(&self, root: &str, segments: &[Segment], value: &Value) -> Result<(), Error> {
-        self.find(root)?.1.get().write_shared(segments, &mut |target| target.assign(value))
+        self.writable(root)?.get().write_shared(segments, &mut |target| target.assign(value))
     }
 
     /// Resolves `segments` below `root` for writing and calls `visit` on the result.
     pub(crate) fn write_shared_at(&self, root: &str, segments: &[Segment], visit: VisitMut<'_>) -> Result<(), Error> {
-        self.find(root)?.1.get().write_shared(segments, visit)
+        self.writable(root)?.get().write_shared(segments, visit)
     }
 
     /// An exact root name, or the unique one ending in `::name`.

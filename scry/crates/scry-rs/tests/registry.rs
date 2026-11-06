@@ -402,3 +402,26 @@ fn router_enums_and_static_str_fields_reflect() {
     let built: Result<NavTab, scry::Error> = scry::__private::FromValue::from_value(&json!({ "label": "x" }));
     assert_eq!(built.err().map(|error| error.code()), Some("cannot_convert"));
 }
+
+#[test]
+fn consts_can_be_read_but_not_changed() {
+    // What the generator emits for a `const`: a leaked copy, registered as a const root. The
+    // Mutex is the point: the copy could be changed through it, and must not be.
+    #[allow(clippy::declare_interior_mutable_const)]
+    const TABS: [NavTab; 1] = [NavTab { label: "Alarms", route: std::sync::Mutex::new(Route::Home {}) }];
+    let mut registry = Registry::new();
+    let value: &'static [NavTab; 1] = Box::leak(Box::new(TABS));
+    registry.__add_const("app::TABS", scry::__private::probe_ref!(value));
+    assert_eq!(execute(&registry, "get TABS[0].label")["result"], json!("Alarms"));
+    assert_eq!(
+        execute(&registry, "roots")["result"],
+        json!([{ "name": "app::TABS", "type": "[NavTab; 1]", "const": true }])
+    );
+    // Refused even through the Mutex, which would otherwise allow it.
+    let reply = execute(&registry, "set TABS[0].route \"Blank\"");
+    assert_eq!(reply["error"]["code"], json!("not_writable"), "{reply}");
+    assert!(reply["error"]["message"].as_str().unwrap().contains("app::TABS is a const"), "{reply}");
+    assert_eq!(execute(&registry, "eval TABS[0].label")["result"], json!("Alarms"));
+    let reply = execute(&registry, "eval TABS[0].route = \"Blank\"");
+    assert!(reply["error"]["message"].as_str().is_some_and(|message| message.contains("is a const")), "{reply}");
+}

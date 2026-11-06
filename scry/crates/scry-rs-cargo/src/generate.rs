@@ -27,9 +27,9 @@ use quote::{ToTokens, format_ident, quote};
 use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
 use syn::{
-    Attribute, Expr, Fields, GenericParam, ImplItemFn, ItemEnum, ItemFn, ItemImpl, ItemMacro, ItemMod, ItemStatic,
-    ItemStruct, ItemTrait, ItemUnion, Local, Pat, ReturnType, StaticMutability, TraitBoundModifier, TraitItem,
-    TraitItemFn, Type, TypeParamBound, Visibility, WherePredicate,
+    Attribute, Expr, Fields, GenericParam, ImplItemFn, ItemConst, ItemEnum, ItemFn, ItemImpl, ItemMacro, ItemMod,
+    ItemStatic, ItemStruct, ItemTrait, ItemUnion, Local, Pat, ReturnType, StaticMutability, TraitBoundModifier,
+    TraitItem, TraitItemFn, Type, TypeParamBound, Visibility, WherePredicate,
 };
 
 use crate::config::Config;
@@ -234,6 +234,30 @@ impl<'ast> Visit<'ast> for Generator<'_> {
             self.report.skipped("static", &name, "a `static mut` cannot be referenced safely");
         }
         visit::visit_item_static(self, item);
+    }
+
+    fn visit_item_const(&mut self, item: &'ast ItemConst) {
+        let name = item.ident.to_string();
+        let mut path: Vec<&str> = self.fns.iter().map(String::as_str).collect();
+        path.push(&name);
+        let path = path.join("::");
+        if name == "_" {
+            // `const _: () = ...;`, a compile-time check with nothing to read.
+        } else if !item.generics.params.is_empty() {
+            self.report.skipped("const", &path, "it is generic");
+        } else {
+            self.edits.insert(
+                self.source.end(item.semi_token.span),
+                const_registration(
+                    &name,
+                    &path,
+                    &item.ty.to_token_stream().to_string(),
+                    &functions::cfgs(&item.attrs).to_string(),
+                ),
+            );
+            self.report.generated("const", &path);
+        }
+        visit::visit_item_const(self, item);
     }
 
     fn visit_item_fn(&mut self, item: &'ast ItemFn) {
@@ -722,6 +746,14 @@ fn static_registration(name: &str, path: &str, ty: &str, cfgs: &str) -> String {
     )
 }
 
+/// Registers a `const` as a read-only root. A const has no address, so the registration evaluates
+/// it once into a leaked copy; one registry is built per endpoint, so this happens once.
+fn const_registration(name: &str, path: &str, ty: &str, cfgs: &str) -> String {
+    format!(
+        " {cfgs} #[::scry::__private::linkme::distributed_slice(::scry::__private::STATICS)]          #[linkme(crate = ::scry::__private::linkme)] #[doc(hidden)] #[allow(non_upper_case_globals, clippy::all, clippy::pedantic, clippy::nursery, clippy::restriction)]          static __SCRY_CONST_{name}: ::scry::__private::StaticEntry = {{          fn __scry_register(registry: &mut ::scry::Registry) {{          let value: &'static {ty} = ::std::boxed::Box::leak(::std::boxed::Box::new({name}));          registry.__add_const(::core::concat!(::core::module_path!(), \"::\", {path:?}),          ::scry::__private::probe_ref!(value, ::scry::__private::peeler_for!({ty}))); }} __scry_register }};"
+    )
+}
+
 /// `impl Reflect for dyn Trait`, for the trait object with each combination of `Send` and `Sync`.
 fn dyn_impls(item: &ItemTrait) -> String {
     let name = &item.ident;
@@ -1168,6 +1200,26 @@ mod tests {
         assert!(!out.contains("__SCRY_STATIC_B"));
         assert!(out.contains("\"f::C\""));
         assert!(report.contains("static B: skipped"));
+    }
+
+    #[test]
+    fn registers_consts_as_read_only_roots() {
+        let (out, report) = rewrite(
+            "const A: &[u8] = &[1];
+const _: () = ();
+fn f() { const B: u8 = 3; }
+",
+            false,
+        );
+        assert!(out.contains("static __SCRY_CONST_A"), "{out}");
+        assert!(
+            out.contains("let value: &'static & [u8] = ::std::boxed::Box::leak(::std::boxed::Box::new(A))"),
+            "{out}"
+        );
+        assert!(out.contains("registry.__add_const"));
+        assert!(out.contains("\"f::B\""));
+        assert!(!out.contains("__SCRY_CONST__"), "an unnamed const has nothing to read");
+        assert!(report.contains("const A") && report.contains("const f::B"), "{report}");
     }
 
     #[test]
