@@ -119,6 +119,22 @@ Dioxus's dev-build toast is, don't match and are left out of `text`. These comma
 asynchronously on the UI thread, so the app keeps handling events while one waits. They aren't
 available inside `eval` scripts.
 
+### Several windows
+
+A Dioxus desktop app can open more windows (`window().new_window(VirtualDom::new(Notes), cfg)`),
+each with a virtual dom, state and router of its own. Scry numbers them in the order it first sees
+a component of theirs keep state, starting from 0, the window that runs the endpoint:
+
+```powershell
+scry windows                                  # [{window: 0, components: [App], route: "/about"}, {window: 1, components: [Notes]}]
+scry window 1 get ui                          # any command, run in window 1: its ui, its route
+scry window 1 type textarea "Hello"           # its page
+scry window 1 eval "ui.Notes.note.len()"
+```
+
+Without `window <n>`, a command runs in window 0, as before. A closed window leaves the list, and
+the windows after it move up a number; check `windows` again after closing one.
+
 ## Scripts
 
 `scry eval <script>` runs a [Rhai](https://rhai.rs) script in the app (`scry eval --file x.rhai`, or

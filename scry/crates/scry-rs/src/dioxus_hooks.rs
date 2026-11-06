@@ -11,9 +11,9 @@
 use std::any::type_name;
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 
-use dioxus_core::{current_scope_id, spawn, use_hook};
+use dioxus_core::{Runtime, ScopeId, current_scope_id, spawn, use_hook};
 use futures_channel::mpsc::UnboundedReceiver;
 use futures_util::StreamExt;
 use serde_json::{Map, Value};
@@ -24,6 +24,8 @@ use crate::{Error, Kind, Member, Reflect, Segment, Visit, VisitMut};
 
 struct Hook {
     id: u64,
+    /// The window it is in (see [`current_window`]); scope ids are only unique within one.
+    window: Option<u64>,
     scope: usize,
     component: &'static str,
     name: &'static str,
@@ -60,7 +62,8 @@ pub fn track(component: &'static str, name: &'static str, value: impl FnOnce() -
             id
         });
         let scope = current_scope_id().0;
-        HOOKS.with(|hooks| hooks.borrow_mut().push(Hook { id, scope, component, name, value: value() }));
+        let window = current_window();
+        HOOKS.with(|hooks| hooks.borrow_mut().push(Hook { id, window, scope, component, name, value: value() }));
         Rc::new(Registration(id))
     });
 }
@@ -85,21 +88,136 @@ pub fn start_endpoint() {
 pub fn use_endpoint() {
     use_hook(|| {
         crate::run_async::capture_runtime();
+        // The window that pumps the endpoint is window 0.
+        current_window();
         let jobs = JOBS.lock().ok().and_then(|mut jobs| jobs.take());
         if let Some(mut jobs) = jobs {
             spawn(async move {
                 let registry = crate::Registry::discovered();
                 while let Some((command, reply)) = jobs.next().await {
-                    let answer = match crate::dioxus_dom::script(&command) {
-                        Some(Ok(script)) => crate::command::reply(crate::dioxus_dom::run(script).await, Vec::new()),
-                        Some(Err(error)) => crate::command::reply(Err(error), Vec::new()),
-                        None => crate::execute(&registry, &command),
-                    };
+                    let answer = answer(&registry, &command).await;
                     let _ = reply.send(answer.to_string());
                 }
             });
         }
     });
+}
+
+/// Answers one command: in the window `window <n>` names, else in the endpoint's own.
+async fn answer(registry: &crate::Registry, command: &str) -> Value {
+    let reply = |result| crate::command::reply(result, Vec::new());
+    let (runtime, command) = match in_window(command) {
+        Ok(found) => found,
+        Err(error) => return reply(Err(error)),
+    };
+    let within = |f: &mut dyn FnMut()| match &runtime {
+        Some(runtime) => runtime.in_scope(ScopeId::APP, f),
+        None => f(),
+    };
+    if command.trim() == "windows" {
+        return reply(Ok(list_windows()));
+    }
+    match crate::dioxus_dom::script(command) {
+        Some(Ok(script)) => {
+            let mut eval = None;
+            within(&mut || eval = Some(crate::dioxus_dom::start(&script)));
+            match eval {
+                Some(eval) => reply(crate::dioxus_dom::finish(eval).await),
+                None => reply(Err(Error::BadCommand("the window is gone".into()))),
+            }
+        }
+        Some(Err(error)) => reply(Err(error)),
+        None => {
+            let mut answer = Value::Null;
+            within(&mut || answer = crate::execute(registry, command));
+            answer
+        }
+    }
+}
+
+// ---- Windows ----
+//
+// A Dioxus desktop app may open more windows (`window().new_window(...)`), each with a virtual
+// dom and runtime of its own, all on the UI thread. Scry learns of a window when a component in it
+// tracks a hook, and numbers windows in that order: 0 is the endpoint's own. `ui` shows the window
+// a command runs in, and `window <n> <command>` runs any command - `get ui`, `set ui.route`,
+// `click`, `eval` - in window n. `windows` lists them.
+
+struct Window {
+    id: u64,
+    runtime: Weak<Runtime>,
+}
+
+thread_local! {
+    static WINDOWS: RefCell<Vec<Window>> = const { RefCell::new(Vec::new()) };
+}
+
+/// The window whose runtime is current, numbered on first sight; `None` outside any runtime.
+fn current_window() -> Option<u64> {
+    let runtime = Runtime::try_current()?;
+    WINDOWS.with(|windows| {
+        let mut windows = windows.borrow_mut();
+        windows.retain(|window| window.runtime.strong_count() > 0);
+        if let Some(window) = windows.iter().find(|window| std::ptr::eq(window.runtime.as_ptr(), Rc::as_ptr(&runtime)))
+        {
+            return Some(window.id);
+        }
+        let id = NEXT_ID.with(|next| {
+            let id = next.get();
+            next.set(id + 1);
+            id
+        });
+        windows.push(Window { id, runtime: Rc::downgrade(&runtime) });
+        Some(id)
+    })
+}
+
+/// The open windows' runtimes, in the order Scry learned of them.
+fn open_windows() -> Vec<Rc<Runtime>> {
+    WINDOWS.with(|windows| windows.borrow().iter().filter_map(|window| window.runtime.upgrade()).collect())
+}
+
+/// `window <n> <command>`: window n's runtime and the command; else no runtime and `command`.
+fn in_window(command: &str) -> Result<(Option<Rc<Runtime>>, &str), Error> {
+    let command = command.trim_start();
+    let Some(rest) = command.strip_prefix("window").filter(|rest| rest.starts_with(char::is_whitespace)) else {
+        return Ok((None, command));
+    };
+    let rest = rest.trim_start();
+    let (index, command) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
+    let windows = open_windows();
+    let runtime =
+        index.parse::<usize>().ok().and_then(|index| windows.get(index).cloned()).ok_or_else(|| {
+            Error::BadCommand(format!("no window {index}; `windows` lists the {} open", windows.len()))
+        })?;
+    if command.trim().is_empty() {
+        return Err(Error::BadCommand("expected `window <n> <command>`".into()));
+    }
+    Ok((Some(runtime), command))
+}
+
+/// `windows`: each window's number, its components with state, and its route.
+fn list_windows() -> Value {
+    let list = open_windows()
+        .iter()
+        .enumerate()
+        .map(|(index, runtime)| {
+            runtime.in_scope(ScopeId::APP, || {
+                let mut window = Map::new();
+                window.insert("window".into(), Value::from(index));
+                let components: Vec<Value> =
+                    with_tree(|tree| tree.keys().map(|name| Value::String((*name).to_owned())).collect());
+                window.insert("components".into(), Value::Array(components));
+                for (name, value) in extras() {
+                    if name == "route" {
+                        window.insert(name.into(), value.snapshot(1));
+                    }
+                }
+                Value::Object(window)
+            })
+        })
+        .collect();
+    Value::Array(list)
 }
 
 /// The `ui` root.
@@ -119,8 +237,9 @@ struct Component<'a> {
 fn with_tree<R>(f: impl FnOnce(&BTreeMap<&'static str, Component<'_>>) -> R) -> R {
     HOOKS.with(|hooks| {
         let hooks = hooks.borrow();
+        let window = current_window();
         let mut scopes: BTreeMap<usize, Vec<&Hook>> = BTreeMap::new();
-        for hook in hooks.iter() {
+        for hook in hooks.iter().filter(|hook| window.is_none() || hook.window == window) {
             scopes.entry(hook.scope).or_default().push(hook);
         }
         let mut tree: BTreeMap<&'static str, Component<'_>> = BTreeMap::new();

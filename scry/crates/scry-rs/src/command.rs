@@ -13,7 +13,8 @@ const HELP: &str = "roots | ls <path> | get <path> [depth] | set <path> <json>
                     | call <function or path.method> [json args] | fns [filter] | eval <rhai script> | help";
 
 /// The commands a Dioxus app's endpoint answers through its page; see `dioxus_dom`.
-const PAGE_HELP: &str = "js <code> | click <selector> | type <selector> <text> | text [selector]   (Dioxus apps; a selector is CSS or text=Label)";
+const PAGE_HELP: &str = "js <code> | click <selector> | type <selector> <text> | text [selector]   (Dioxus apps; a selector is CSS or text=Label) \
+                         | windows | window <n> <command>   (Dioxus apps with several windows)";
 
 /// Runs one text command against `registry` and returns a JSON reply:
 /// `{"ok":true,"result":...}` or `{"ok":false,"error":{"code":...,"message":...}}`, plus an
@@ -107,7 +108,7 @@ fn run(registry: &Registry, line: &str, output: &mut Vec<String>) -> Result<Valu
             let _ = output;
             Err(Error::BadCommand("scripts need scry-rs's `script` feature, which this build turned off".into()))
         }
-        "js" | "click" | "type" | "text" => Err(Error::BadCommand(format!(
+        "js" | "click" | "type" | "text" | "windows" | "window" => Err(Error::BadCommand(format!(
             "'{verb}' drives a Dioxus app's page, through the endpoint of an app built with scry-rs's `dioxus` feature"
         ))),
         "help" | "" => {

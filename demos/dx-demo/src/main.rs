@@ -5,7 +5,8 @@
 //! holding the board, and component-local signals, one of them updated by a background future.
 //! Ordinary signals belong to the UI thread, so an endpoint running on another thread will have to
 //! marshal onto it to read or write them - the Rust equivalent of Scry.NET's WPF/WinForms adapters.
-//! It also has a router with a few pages, to switch between from outside (`scry set ui.route ...`).
+//! It also has a router with a few pages, to switch between from outside (`scry set ui.route ...`),
+//! and opens a second window (About, "Open a notes window") for `scry windows`.
 
 mod model;
 
@@ -133,6 +134,26 @@ fn About() -> Element {
     rsx! {
         Nav {}
         p { "A Dioxus desktop app for Scry.Rust to attach to." }
+        button {
+            onclick: move |_| {
+                dioxus::desktop::window().new_window(VirtualDom::new(Notes), dioxus::desktop::Config::new());
+            },
+            "Open a notes window"
+        }
+    }
+}
+
+/// The root of a second window: a virtual dom of its own, with its own state.
+#[component]
+fn Notes() -> Element {
+    let mut note = use_signal(String::new);
+    rsx! {
+        div { style: "font-family: 'Segoe UI', sans-serif; padding: 16px;",
+            h2 { "Notes" }
+            textarea { rows: 4, value: "{note}", oninput: move |event| note.set(event.value()) }
+            p { "{note.read().len()} characters" }
+            button { onclick: move |_| dioxus::desktop::window().close(), "Close" }
+        }
     }
 }
 

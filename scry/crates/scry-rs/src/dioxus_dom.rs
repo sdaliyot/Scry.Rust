@@ -180,8 +180,13 @@ fn quote(text: &str) -> String {
 }
 
 /// Runs `script` in the app's webview and waits for its answer.
-pub(crate) async fn run(script: String) -> Result<Value, Error> {
-    let eval = dioxus_document::eval(&script);
+/// Sends `script` to the webview of the window whose runtime is current.
+pub(crate) fn start(script: &str) -> dioxus_document::Eval {
+    dioxus_document::eval(script)
+}
+
+/// Waits for a script's answer.
+pub(crate) async fn finish(eval: dioxus_document::Eval) -> Result<Value, Error> {
     let (sender, timeout) = futures_channel::oneshot::channel::<()>();
     std::thread::spawn(move || {
         std::thread::sleep(TIMEOUT);
@@ -192,6 +197,11 @@ pub(crate) async fn run(script: String) -> Result<Value, Error> {
             Err(Error::Script(object[ERROR_KEY].as_str().unwrap_or_default().to_owned()))
         }
         Either::Left((Ok(value), _)) => Ok(value),
+        // What a page that went away while running the script - a click that closed its window -
+        // reports.
+        Either::Left((Err(dioxus_document::EvalError::Finished), _)) => {
+            Err(Error::Script("the page went away before it answered (its window closed?)".into()))
+        }
         Either::Left((Err(error), _)) => Err(Error::Script(error.to_string())),
         Either::Right(_) => Err(Error::Timeout(format!("the page did not answer within {}s", TIMEOUT.as_secs_f32()))),
     }

@@ -35,7 +35,8 @@ commands: roots | ls <path> | get <path> [depth] | set <path> <json> | help
           hook before <id> [<rhai>] | hook after <id> [<rhai>]   (change calls; empty removes)
           hook remove <id> | hook clear
           js <code> | click <selector> | type <selector> <text> | text [selector]
-                                       (a Dioxus app's page; selector: CSS, or text=Label)";
+                                       (a Dioxus app's page; selector: CSS, or text=Label)
+          windows | window <n> <command>   (a Dioxus app's other windows)";
 
 /// Must match `scry::endpoint::targets_dir`.
 fn targets_dir() -> PathBuf {
