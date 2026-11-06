@@ -93,9 +93,12 @@ which shows its own error page when it doesn't. Scripts read and set it the same
 and call `back()` and `forward()` (or `invoke("ui::back")` when the app has its own `back`). Both return
 the route they land on, and fail when there is nowhere to go.
 Scry learns the routes from the router at runtime, through Dioxus's type-erased router handle, so it
-works with any `#[derive(Routable)]` type. `cargo scry` turns this on (`scry-rs`'s `dioxus-router`
-feature) for an app that depends on `dioxus-router`, directly or through `dioxus`'s `router` feature.
-With several windows, it is the router of the window that runs the endpoint, the first one.
+works with any `#[derive(Routable)]` type. Nested route types (`#[child("/settings")] Settings { child:
+SettingsRoute }`) are part of it: `ui.routes` lists their routes in full (`/settings/theme/:name`),
+and `ui.route` checks against them. A second `Router` component placed inside a page has routes of
+its own that Scry doesn't see; its pages are still reachable through `click`. `cargo scry` turns
+this on (`scry-rs`'s `dioxus-router` feature) for an app that depends on `dioxus-router`, directly or
+through `dioxus`'s `router` feature. Each window has its own router; see "Several windows".
 
 ### Clicking, typing and reading the page
 

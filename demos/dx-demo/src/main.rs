@@ -9,6 +9,9 @@
 //! and opens a second window (About, "Open a notes window") for `scry windows`. About also loads the
 //! board's stats with `use_resource` and clears finished tasks with `use_action`.
 
+// `#[derive(Routable)]` writes `child: child` for a `#[child]` route.
+#![allow(clippy::redundant_field_names)]
+
 mod model;
 
 use std::time::Duration;
@@ -45,6 +48,18 @@ enum Route {
     TaskDetail { id: u32 },
     #[route("/about")]
     About {},
+    /// A child route type: its routes live under `/settings`.
+    #[child("/settings")]
+    Settings { child: SettingsRoute },
+}
+
+/// The settings pages, nested under `/settings`.
+#[derive(Routable, Clone, PartialEq)]
+enum SettingsRoute {
+    #[route("/")]
+    General {},
+    #[route("/theme/:name")]
+    Theme { name: String },
 }
 
 fn main() {
@@ -82,6 +97,7 @@ fn Nav() -> Element {
         nav { style: "margin-bottom: 8px; display: flex; gap: 12px;",
             Link { to: Route::Tasks {}, "Tasks" }
             Link { to: Route::About {}, "About" }
+            Link { to: Route::Settings { child: SettingsRoute::General {} }, "Settings" }
         }
     }
 }
@@ -165,6 +181,27 @@ fn About() -> Element {
             },
             "Open a notes window"
         }
+    }
+}
+
+#[component]
+fn General() -> Element {
+    rsx! {
+        Nav {}
+        h3 { "Settings" }
+        for name in ["light", "dark"] {
+            p {
+                Link { to: Route::Settings { child: SettingsRoute::Theme { name: name.to_owned() } }, "Theme: {name}" }
+            }
+        }
+    }
+}
+
+#[component]
+fn Theme(name: String) -> Element {
+    rsx! {
+        Nav {}
+        h3 { "Theme {name}" }
     }
 }
 

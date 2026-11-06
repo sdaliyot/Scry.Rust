@@ -125,28 +125,28 @@ fn navigate(router: RouterContext, target: &str) -> Result<(), Error> {
     }
 }
 
-/// `/tasks/:id`, `/files/:..path`; `/` for the root.
+/// `/tasks/:id`, `/files/:..path`; `/` for the root. A child route type (`#[child("/settings")]`)
+/// adds nothing of its own: the site map continues with the child type's segments after it, so
+/// its routes read in full (`/settings/theme/:name`).
 fn format_pattern(route: &[SegmentType]) -> String {
     let pattern: String = route
         .iter()
-        .filter(|segment| !matches!(segment, SegmentType::Static("")))
-        .map(|segment| match segment {
-            SegmentType::Child => "/:..child".to_owned(),
-            other => other.to_string(),
-        })
+        .filter(|segment| !matches!(segment, SegmentType::Static("") | SegmentType::Child))
+        .map(ToString::to_string)
         .collect();
     if pattern.is_empty() { "/".to_owned() } else { pattern }
 }
 
 /// Whether the path of `target` (its query and fragment ignored) fits `route`'s segments. A
 /// dynamic segment takes any one path segment; whether its text parses is up to the app's route
-/// type, which shows its own error page if it doesn't.
+/// type, which shows its own error page if it doesn't. A child route type's segments follow its
+/// `Child` marker, and are matched like the parent's.
 fn matches(route: &[SegmentType], target: &str) -> bool {
     let path = target.split(['?', '#']).next().unwrap_or_default();
     let mut parts = path.split('/').filter(|part| !part.is_empty());
     for segment in route {
         match segment {
-            SegmentType::Static("") => {}
+            SegmentType::Static("") | SegmentType::Child => {}
             SegmentType::Static(text) => {
                 if parts.next() != Some(*text) {
                     return false;
@@ -157,7 +157,7 @@ fn matches(route: &[SegmentType], target: &str) -> bool {
                     return false;
                 }
             }
-            SegmentType::CatchAll(_) | SegmentType::Child => return true,
+            SegmentType::CatchAll(_) => return true,
             // A kind of segment added after this was written: let the router decide.
             _ => return true,
         }
@@ -221,7 +221,25 @@ mod tests {
         let files = [SegmentType::Static("files"), SegmentType::CatchAll("path")];
         assert!(matches(&files, "/files"));
         assert!(matches(&files, "/files/a/b"));
-        assert!(matches(&[SegmentType::Static("admin"), SegmentType::Child], "/admin/users/7"));
+    }
+
+    /// `#[child("/admin")] Admin { child: AdminRoute }`, with `AdminRoute`'s `/users/:id` and `/`.
+    #[test]
+    fn child_routes_match_and_read_in_full() {
+        let user = [
+            SegmentType::Static("admin"),
+            SegmentType::Child,
+            SegmentType::Static("users"),
+            SegmentType::Dynamic("id"),
+        ];
+        let home = [SegmentType::Static("admin"), SegmentType::Child, ROOT];
+        assert!(matches(&user, "/admin/users/7"));
+        assert!(!matches(&user, "/admin/users"));
+        assert!(!matches(&user, "/admin/groups/7"));
+        assert!(matches(&home, "/admin"));
+        assert!(!matches(&home, "/admin/x"));
+        assert_eq!(format_pattern(&user), "/admin/users/:id");
+        assert_eq!(format_pattern(&home), "/admin");
     }
 
     #[test]
