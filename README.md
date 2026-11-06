@@ -83,11 +83,15 @@ In an app with a Dioxus router, `ui` also has the router's state:
 scry get ui.route                 # the current route, as its URL: "/tasks/3"
 scry get ui.routes                # the patterns the app declares: ["/", "/tasks/:id", "/about"]
 scry set ui.route '"/about"'      # navigate, as a Link would; Back returns to the previous page
+scry get ui.can_go_back           # whether there is a previous page (ui.can_go_forward: a next one)
+scry call ui::back                # the previous page, as the Back button would; ui::forward likewise
 ```
 
 Setting `ui.route` checks the URL against the declared patterns first, and refuses one that matches
 none of them. Whether a dynamic segment parses (`:id` as a number) is up to the app's route type,
-which shows its own error page when it doesn't. Scripts read and set it the same way (`ui.route = "/"`).
+which shows its own error page when it doesn't. Scripts read and set it the same way (`ui.route = "/"`),
+and call `back()` and `forward()` (or `invoke("ui::back")` when the app has its own `back`). Both return
+the route they land on, and fail when there is nowhere to go.
 Scry learns the routes from the router at runtime, through Dioxus's type-erased router handle, so it
 works with any `#[derive(Routable)]` type. `cargo scry` turns this on (`scry-rs`'s `dioxus-router`
 feature) for an app that depends on `dioxus-router`, directly or through `dioxus`'s `router` feature.

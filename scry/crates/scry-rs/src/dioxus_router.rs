@@ -5,14 +5,74 @@
 //! Nothing here knows the app's route type. Dioxus keeps a type-erased handle on the router at the
 //! root of the virtual dom ([`root_router`]), which reads and pushes routes as strings, and every
 //! `#[derive(Routable)]` enum publishes its site map through it.
+//!
+//! The router's history is reachable as well: `ui.can_go_back` and `ui.can_go_forward` read it, and
+//! the built-in functions `scry::ui::back` and `scry::ui::forward` (`scry call ui::back`, `back()`
+//! in a script) step through it, as the browser's buttons would.
 
 use dioxus_router::{NavigationTarget, RouterContext, SegmentType, SiteMapSegment, root_router};
 use serde_json::Value;
 
+use crate::call::{Function, Receiver};
 use crate::{Error, Reflect};
 
 pub(crate) const ROUTE: &str = "route";
 pub(crate) const ROUTES: &str = "routes";
+pub(crate) const CAN_GO_BACK: &str = "can_go_back";
+pub(crate) const CAN_GO_FORWARD: &str = "can_go_forward";
+
+/// The members the router adds to `ui`, with their values.
+pub(crate) fn members(router: RouterContext) -> [(&'static str, Box<dyn Reflect>); 4] {
+    [
+        (ROUTE, Box::new(current(router))),
+        (ROUTES, Box::new(Patterns(patterns(router)))),
+        (CAN_GO_BACK, Box::new(router.can_go_back())),
+        (CAN_GO_FORWARD, Box::new(router.can_go_forward())),
+    ]
+}
+
+#[linkme::distributed_slice(crate::__private::FUNCTIONS)]
+#[linkme(crate = linkme)]
+static BACK: Function = Function {
+    name: "back",
+    path: "scry::ui::back",
+    signature: "fn back() -> String  // the previous route, as the browser's Back button",
+    receiver: Receiver::None,
+    self_type: None,
+    trait_name: None,
+    arity: 0,
+    invoke: |_, _, _| step(Direction::Back),
+};
+
+#[linkme::distributed_slice(crate::__private::FUNCTIONS)]
+#[linkme(crate = linkme)]
+static FORWARD: Function = Function {
+    name: "forward",
+    path: "scry::ui::forward",
+    signature: "fn forward() -> String  // the next route, as the browser's Forward button",
+    receiver: Receiver::None,
+    self_type: None,
+    trait_name: None,
+    arity: 0,
+    invoke: |_, _, _| step(Direction::Forward),
+};
+
+enum Direction {
+    Back,
+    Forward,
+}
+
+/// Goes one step back or forward in the router's history, returning the route it lands on.
+fn step(direction: Direction) -> Result<Value, Error> {
+    let router = router().ok_or_else(|| Error::BadCommand("the app has no Dioxus router".into()))?;
+    match direction {
+        Direction::Back if router.can_go_back() => router.go_back(),
+        Direction::Forward if router.can_go_forward() => router.go_forward(),
+        Direction::Back => return Err(Error::BadCommand("there is no previous route to go back to".into())),
+        Direction::Forward => return Err(Error::BadCommand("there is no next route to go forward to".into())),
+    }
+    Ok(Value::String(current(router)))
+}
 
 /// The router of the app's virtual dom, if it has one. Only on the UI thread, inside the runtime.
 pub(crate) fn router() -> Option<RouterContext> {
@@ -130,11 +190,15 @@ impl Reflect for Patterns {
     }
 
     fn write(&mut self, _: &[crate::Segment], _: crate::VisitMut<'_>) -> Result<(), Error> {
-        Err(Error::not_writable("ui.routes lists the routes the app declares; set ui.route to navigate"))
+        Err(Error::not_writable(
+            "ui.routes lists the routes the app declares; set ui.route to navigate, or call ui::back or ui::forward",
+        ))
     }
 
     fn write_shared(&self, _: &[crate::Segment], _: crate::VisitMut<'_>) -> Result<(), Error> {
-        Err(Error::not_writable("ui.routes lists the routes the app declares; set ui.route to navigate"))
+        Err(Error::not_writable(
+            "ui.routes lists the routes the app declares; set ui.route to navigate, or call ui::back or ui::forward",
+        ))
     }
 }
 
