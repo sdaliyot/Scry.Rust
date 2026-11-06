@@ -1,6 +1,7 @@
 //! The extra `--features` a `cargo scry` build turns on, from `cargo metadata`:
 //!
-//! - scry-rs's optional lock support (`scry/tokio`) when the crate is in the dependency graph.
+//! - scry-rs's optional support for tokio (`scry/tokio`) and the Dioxus router (`scry/dioxus-router`)
+//!   when that crate is in the dependency graph.
 //! - The serde feature of each direct dependency that has one (`uuid/serde`, `chrono/serde`), so
 //!   its types are read and written as values rather than shown through `Debug`. Serde features
 //!   only add impls, so this changes what Scry sees, not what the app does; and it applies to
@@ -27,7 +28,7 @@ use serde_json::Value;
 /// `args`, run in `cwd`.
 pub fn extra(metadata: &Value, args: &[OsString], cwd: &Path) -> Result<Vec<String>, String> {
     let packages = metadata["packages"].as_array().map(Vec::as_slice).unwrap_or_default();
-    let mut features: Vec<String> = ["tokio"]
+    let mut features: Vec<String> = ["tokio", "dioxus-router"]
         .into_iter()
         .filter(|name| packages.iter().any(|package| package["name"] == *name))
         .map(|name| format!("scry/{name}"))
@@ -252,6 +253,13 @@ mod tests {
 
     fn args(text: &str) -> Vec<OsString> {
         text.split_whitespace().map(OsString::from).collect()
+    }
+
+    #[test]
+    fn turns_on_router_support_when_the_app_has_a_router() {
+        let routed = json!({ "packages": [{ "id": "dioxus-router", "name": "dioxus-router", "features": {} }] });
+        assert_eq!(extra(&routed, &args("build"), Path::new("/none")).unwrap(), ["scry/dioxus-router"]);
+        assert!(extra(&json!({ "packages": [] }), &args("build"), Path::new("/none")).unwrap().is_empty());
     }
 
     #[test]

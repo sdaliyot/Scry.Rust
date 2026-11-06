@@ -48,6 +48,8 @@ mod wait;
 pub mod dioxus_hooks;
 #[cfg(feature = "dioxus")]
 mod dioxus_impls;
+#[cfg(feature = "dioxus-router")]
+mod dioxus_router;
 
 #[doc(hidden)]
 pub mod __private;

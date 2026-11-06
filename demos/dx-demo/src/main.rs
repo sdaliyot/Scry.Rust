@@ -5,6 +5,7 @@
 //! holding the board, and component-local signals, one of them updated by a background future.
 //! Ordinary signals belong to the UI thread, so an endpoint running on another thread will have to
 //! marshal onto it to read or write them - the Rust equivalent of Scry.NET's WPF/WinForms adapters.
+//! It also has a router with a few pages, to switch between from outside (`scry set ui.route ...`).
 
 mod model;
 
@@ -33,15 +34,25 @@ impl Filter {
     }
 }
 
+/// The pages. `ui.route` reads and sets these as URLs (`/tasks/3`).
+#[derive(Routable, Clone, PartialEq)]
+enum Route {
+    #[route("/")]
+    Tasks {},
+    #[route("/tasks/:id")]
+    TaskDetail { id: u32 },
+    #[route("/about")]
+    About {},
+}
+
 fn main() {
     dioxus::launch(App);
 }
 
 #[component]
 fn App() -> Element {
-    let mut board = use_context_provider(|| Signal::new(Board::seeded()));
+    let board = use_context_provider(|| Signal::new(Board::seeded()));
     let mut uptime = use_signal(|| 0u64);
-    let mut draft = use_signal(String::new);
 
     use_future(move || async move {
         loop {
@@ -57,26 +68,71 @@ fn App() -> Element {
         div { style: "font-family: 'Segoe UI', sans-serif; padding: 16px;",
             h2 { "Scry.Rust dx demo" }
             p { "pid {pid} · up {uptime}s · {summary}" }
-            div {
-                input {
-                    value: "{draft}",
-                    placeholder: "New task",
-                    oninput: move |event| draft.set(event.value()),
-                }
-                button {
-                    onclick: move |_| {
-                        let title = draft.read().trim().to_owned();
-                        if !title.is_empty() {
-                            board.write().add(&title, Priority::Normal);
-                            draft.set(String::new());
-                        }
-                    },
-                    "Add"
-                }
-            }
-            FilterBar {}
-            TaskList {}
+            Router::<Route> {}
         }
+    }
+}
+
+/// Links to the pages, above each of them.
+#[component]
+fn Nav() -> Element {
+    rsx! {
+        nav { style: "margin-bottom: 8px; display: flex; gap: 12px;",
+            Link { to: Route::Tasks {}, "Tasks" }
+            Link { to: Route::About {}, "About" }
+        }
+    }
+}
+
+#[component]
+fn Tasks() -> Element {
+    let mut board = use_context::<Signal<Board>>();
+    let mut draft = use_signal(String::new);
+    rsx! {
+        Nav {}
+        div {
+            input {
+                value: "{draft}",
+                placeholder: "New task",
+                oninput: move |event| draft.set(event.value()),
+            }
+            button {
+                onclick: move |_| {
+                    let title = draft.read().trim().to_owned();
+                    if !title.is_empty() {
+                        board.write().add(&title, Priority::Normal);
+                        draft.set(String::new());
+                    }
+                },
+                "Add"
+            }
+        }
+        FilterBar {}
+        TaskList {}
+    }
+}
+
+#[component]
+fn TaskDetail(id: u32) -> Element {
+    let board = use_context::<Signal<Board>>();
+    let task = board.read().tasks().iter().find(|task| task.id == id).cloned();
+    rsx! {
+        Nav {}
+        match task {
+            Some(task) => rsx! {
+                h3 { "{task.title}" }
+                p { "Priority {task.priority:?} · " if task.done { "done" } else { "open" } }
+            },
+            None => rsx! { p { "No task {id}." } },
+        }
+    }
+}
+
+#[component]
+fn About() -> Element {
+    rsx! {
+        Nav {}
+        p { "A Dioxus desktop app for Scry.Rust to attach to." }
     }
 }
 
@@ -112,7 +168,9 @@ fn TaskList() -> Element {
                         checked: task.done,
                         onchange: move |_| board.write().toggle(task.id),
                     }
-                    " {task.title} ({task.priority:?})"
+                    " "
+                    Link { to: Route::TaskDetail { id: task.id }, "{task.title}" }
+                    " ({task.priority:?})"
                 }
             }
         }

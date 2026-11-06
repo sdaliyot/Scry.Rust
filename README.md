@@ -75,6 +75,24 @@ becomes `cargo scry run -p console-demo`.
 For `dx-demo`, the component signals are under `ui`: `scry get ui`, `scry set ui.App.uptime 1000`,
 `scry set FILTER Done`.
 
+### Pages (the Dioxus router)
+
+In an app with a Dioxus router, `ui` also has the router's state:
+
+```powershell
+scry get ui.route                 # the current route, as its URL: "/tasks/3"
+scry get ui.routes                # the patterns the app declares: ["/", "/tasks/:id", "/about"]
+scry set ui.route '"/about"'      # navigate, as a Link would; Back returns to the previous page
+```
+
+Setting `ui.route` checks the URL against the declared patterns first, and refuses one that matches
+none of them. Whether a dynamic segment parses (`:id` as a number) is up to the app's route type,
+which shows its own error page when it doesn't. Scripts read and set it the same way (`ui.route = "/"`).
+Scry learns the routes from the router at runtime, through Dioxus's type-erased router handle, so it
+works with any `#[derive(Routable)]` type. `cargo scry` turns this on (`scry-rs`'s `dioxus-router`
+feature) for an app that depends on `dioxus-router`, directly or through `dioxus`'s `router` feature.
+With several windows, it is the router of the window that runs the endpoint, the first one.
+
 ## Scripts
 
 `scry eval <script>` runs a [Rhai](https://rhai.rs) script in the app (`scry eval --file x.rhai`, or

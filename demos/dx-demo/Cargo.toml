@@ -9,6 +9,6 @@ publish.workspace = true
 scry = ["dep:scry"]
 
 [dependencies]
-dioxus = { version = "0.7", features = ["desktop"] }
+dioxus = { version = "0.7", features = ["desktop", "router"] }
 tokio = { version = "1", features = ["time"] }
 scry = { package = "scry-rs", path = "../../scry/crates/scry-rs", optional = true, features = ["dioxus"] }

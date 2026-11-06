@@ -21,6 +21,8 @@ script = ["dep:rhai"]
 # Reflect impls for Dioxus signals. They are owned by the UI thread, so a registry that holds them
 # has to be driven from that thread too.
 dioxus = ["dep:dioxus-signals", "dep:dioxus-core", "dep:futures-channel", "dep:futures-util"]
+# `ui.route` and `ui.routes`: the app's router. `cargo scry` turns this on for an app that depends on dioxus-router.
+dioxus-router = ["dioxus", "dep:dioxus-router"]
 
 [dependencies]
 scry-rs-derive = { path = "../scry-rs-derive" }
@@ -36,6 +38,7 @@ tokio = { version = "1", optional = true, default-features = false, features = [
 rhai = { version = "1.27", optional = true }
 dioxus-signals = { version = "0.7", optional = true }
 dioxus-core = { version = "0.7", optional = true }
+dioxus-router = { version = "0.7", optional = true }
 futures-channel = { version = "0.3", optional = true }
 futures-util = { version = "0.3", optional = true, default-features = false }
 

@@ -270,24 +270,46 @@ impl Reflect for Ui {
     }
 
     fn members(&self) -> Vec<Member> {
-        with_tree(|tree| tree.iter().map(|(name, component)| Member::new(*name, component.type_name())).collect())
+        let mut members: Vec<Member> =
+            with_tree(|tree| tree.iter().map(|(name, component)| Member::new(*name, component.type_name())).collect());
+        #[cfg(feature = "dioxus-router")]
+        if crate::dioxus_router::router().is_some() {
+            members.push(Member::new(crate::dioxus_router::ROUTE, type_name::<String>()));
+            members.push(Member::new(crate::dioxus_router::ROUTES, "routes"));
+        }
+        members
     }
 
     fn snapshot(&self, depth: usize) -> Value {
         if depth == 0 {
             return truncated("ui");
         }
-        with_tree(|tree| {
-            Value::Object(
-                tree.iter().map(|(name, component)| ((*name).to_owned(), component.snapshot(depth - 1))).collect(),
-            )
-        })
+        #[allow(unused_mut)]
+        let mut object: Map<String, Value> = with_tree(|tree| {
+            tree.iter().map(|(name, component)| ((*name).to_owned(), component.snapshot(depth - 1))).collect()
+        });
+        #[cfg(feature = "dioxus-router")]
+        if let Some(router) = crate::dioxus_router::router() {
+            use crate::dioxus_router::{ROUTE, ROUTES, current, patterns};
+            object.insert(ROUTE.to_owned(), Value::String(current(router)));
+            object.insert(ROUTES.to_owned(), patterns(router).snapshot(depth - 1));
+        }
+        Value::Object(object)
     }
 
     fn read(&self, path: &[Segment], visit: Visit<'_>) -> Result<(), Error> {
         let Some((segment, rest)) = path.split_first() else {
             return visit(self);
         };
+        #[cfg(feature = "dioxus-router")]
+        if let Some(router) = crate::dioxus_router::router() {
+            use crate::dioxus_router::{Patterns, ROUTE, ROUTES, current, patterns};
+            match segment.field() {
+                Some(ROUTE) => return current(router).read(rest, visit),
+                Some(ROUTES) => return Patterns(patterns(router)).read(rest, visit),
+                _ => {}
+            }
+        }
         with_tree(|tree| component(tree, segment)?.read(rest, visit))
     }
 
@@ -299,6 +321,18 @@ impl Reflect for Ui {
         let Some((segment, rest)) = path.split_first() else {
             return Err(not_writable_here("ui"));
         };
+        #[cfg(feature = "dioxus-router")]
+        if let Some(router) = crate::dioxus_router::router() {
+            use crate::dioxus_router::{Patterns, ROUTE, ROUTES, write};
+            match (segment.field(), rest) {
+                (Some(ROUTE), []) => return write(router, visit),
+                (Some(ROUTE), _) => {
+                    return Err(Error::not_writable("set ui.route as a whole, to a route such as \"/\""));
+                }
+                (Some(ROUTES), _) => return Patterns(Vec::new()).write_shared(rest, visit),
+                _ => {}
+            }
+        }
         with_tree(|tree| component(tree, segment)?.write_shared(rest, visit))
     }
 }
