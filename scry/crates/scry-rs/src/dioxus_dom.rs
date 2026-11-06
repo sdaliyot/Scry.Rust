@@ -9,7 +9,8 @@
 //! - `text [selector]` returns the visible text of an element, or of the whole page.
 //!
 //! A selector is a CSS selector (`#add`, `button.primary`, `li:nth-child(2) input`), or
-//! `text=Label` for the innermost element whose visible text is exactly `Label`. One with spaces
+//! `text=Label` for the innermost element whose visible text is `Label`, ignoring case and runs of
+//! whitespace (a label CSS shows in capitals still matches as written in the code). One with spaces
 //! is written as a JSON string: `click "nav a"`.
 //!
 //! Event handlers in Dioxus are closures inside the rendered tree, out of reach of the registry; the
@@ -57,9 +58,12 @@ const __scry = {
   },
   find(selector) {
     if (selector.startsWith("text=")) {
-      const wanted = selector.slice(5).trim();
+      // As shown: innerText applies CSS, so a label styled uppercase reads "TOTAL"; compare
+      // without case, and with runs of whitespace as one space.
+      const normal = (text) => (text ?? "").replace(/\s+/g, " ").trim().toLowerCase();
+      const wanted = normal(selector.slice(5));
       const matches = [...document.body.querySelectorAll("*")]
-        .filter((el) => __scry.visible(el) && (el.innerText ?? "").trim() === wanted);
+        .filter((el) => normal(el.textContent).includes(wanted) && normal(el.innerText) === wanted && __scry.visible(el));
       return matches.find((el) => !matches.some((other) => other !== el && el.contains(other))) ?? null;
     }
     const all = [...document.querySelectorAll(selector)];

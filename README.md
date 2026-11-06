@@ -107,7 +107,7 @@ with a webview can be driven through its page instead, where the app's own handl
 they do for a user:
 
 ```powershell
-scry click text=Add                       # the innermost visible element showing exactly "Add"
+scry click text=Add                       # the innermost visible element showing "Add", in any case
 scry click "li:nth-child(2) input"        # or any CSS selector; the first visible match
 scry type "input[name=title]" Buy milk    # sets the value and fires input and change
 scry text                                 # the page's visible text; `text <selector>` for one element
