@@ -309,13 +309,13 @@ impl Reflect for Ui {
             return Err(not_writable_here("ui"));
         };
         #[cfg(feature = "dioxus-router")]
-        if let Some(router) = crate::dioxus_router::router() {
-            if segment.field() == Some(crate::dioxus_router::ROUTE) {
-                return match rest {
-                    [] => crate::dioxus_router::write(router, visit),
-                    _ => Err(Error::not_writable("set ui.route as a whole, to a route such as \"/\"")),
-                };
-            }
+        if let Some(router) = crate::dioxus_router::router()
+            && segment.field() == Some(crate::dioxus_router::ROUTE)
+        {
+            return match rest {
+                [] => crate::dioxus_router::write(router, visit),
+                _ => Err(Error::not_writable("set ui.route as a whole, to a route such as \"/\"")),
+            };
         }
         if let Some(name) = segment.field().filter(|name| extras().iter().any(|(extra, _)| extra == name)) {
             return Err(Error::not_writable(format!("ui.{name} is read-only")));
