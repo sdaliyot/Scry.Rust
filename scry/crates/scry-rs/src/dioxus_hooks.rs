@@ -90,7 +90,12 @@ pub fn use_endpoint() {
             spawn(async move {
                 let registry = crate::Registry::discovered();
                 while let Some((command, reply)) = jobs.next().await {
-                    let _ = reply.send(crate::execute(&registry, &command).to_string());
+                    let answer = match crate::dioxus_dom::script(&command) {
+                        Some(Ok(script)) => crate::command::reply(crate::dioxus_dom::run(script).await, Vec::new()),
+                        Some(Err(error)) => crate::command::reply(Err(error), Vec::new()),
+                        None => crate::execute(&registry, &command),
+                    };
+                    let _ = reply.send(answer.to_string());
                 }
             });
         }

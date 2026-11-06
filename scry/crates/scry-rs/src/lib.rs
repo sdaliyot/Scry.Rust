@@ -44,6 +44,8 @@ mod script;
 mod wait;
 
 #[cfg(feature = "dioxus")]
+mod dioxus_dom;
+#[cfg(feature = "dioxus")]
 #[doc(hidden)]
 pub mod dioxus_hooks;
 #[cfg(feature = "dioxus")]

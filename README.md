@@ -97,6 +97,28 @@ works with any `#[derive(Routable)]` type. `cargo scry` turns this on (`scry-rs`
 feature) for an app that depends on `dioxus-router`, directly or through `dioxus`'s `router` feature.
 With several windows, it is the router of the window that runs the endpoint, the first one.
 
+### Clicking, typing and reading the page
+
+Event handlers are closures inside the rendered tree, which the registry can't reach. A Dioxus app
+with a webview can be driven through its page instead, where the app's own handlers run just as
+they do for a user:
+
+```powershell
+scry click text=Add                       # the innermost visible element showing exactly "Add"
+scry click "li:nth-child(2) input"        # or any CSS selector; the first visible match
+scry type "input[name=title]" Buy milk    # sets the value and fires input and change
+scry text                                 # the page's visible text; `text <selector>` for one element
+scry js "return document.title"           # any JavaScript, run as an async function's body
+```
+
+`click` and `type` return the element they acted on (`{tag, id, text}`, or `checked` for a
+checkbox). A selector or text with leading quotes is read as a JSON string (`type "#a b" "  x"`).
+An error the page throws comes back as `script_error` with its message, and a page that doesn't
+answer within 8 seconds as `timeout`. Elements that are hidden, or parked beside the window as
+Dioxus's dev-build toast is, don't match and are left out of `text`. These commands are answered
+asynchronously on the UI thread, so the app keeps handling events while one waits. They aren't
+available inside `eval` scripts.
+
 ## Scripts
 
 `scry eval <script>` runs a [Rhai](https://rhai.rs) script in the app (`scry eval --file x.rhai`, or

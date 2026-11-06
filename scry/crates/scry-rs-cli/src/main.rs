@@ -33,7 +33,9 @@ commands: roots | ls <path> | get <path> [depth] | set <path> <json> | help
           hooks [filter] | hook add <function> [depth=2] [capacity=1000] [self=true] [ttl=30m]
           hook read <id> [cursor] | hook wait <id> [timeout=30s] [cursor=n] [<rhai predicate>]
           hook before <id> [<rhai>] | hook after <id> [<rhai>]   (change calls; empty removes)
-          hook remove <id> | hook clear";
+          hook remove <id> | hook clear
+          js <code> | click <selector> | type <selector> <text> | text [selector]
+                                       (a Dioxus app's page; selector: CSS, or text=Label)";
 
 /// Must match `scry::endpoint::targets_dir`.
 fn targets_dir() -> PathBuf {
