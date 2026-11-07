@@ -1,2 +1,6 @@
 # Keep LF in the repository and in working copies on every platform.
 * text=auto eol=lf
+
+# Binary assets, never converted.
+*.ico binary
+*.res binary

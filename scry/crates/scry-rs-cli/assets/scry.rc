@@ -1,0 +1,2 @@
+// The scry.exe icon. Compiled into scry.res; see build.rs.
+1 ICON "scry.ico"
