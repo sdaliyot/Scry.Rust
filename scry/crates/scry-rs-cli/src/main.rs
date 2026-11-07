@@ -4,6 +4,7 @@
 //! scry-rs list                                  running targets, as JSON
 //! scry-rs [--pid N | --process NAME] <command>  run a registry command in one of them
 //! scry-rs --out shot.png screenshot [selector]   save a Dioxus app's screenshot as a PNG file
+//! scry-rs --wait-for-target 2m <command>         wait for the app to start first
 //! ```
 //!
 //! A command is what the registry understands - `roots`, `ls <path>`, `get <path> [depth]`,
@@ -20,12 +21,13 @@ use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::time::Duration;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
-const USAGE: &str = "usage: scry-rs list
-       scry-rs [--pid N | --process NAME] [--out FILE] <command>
+const USAGE: &str = "usage: scry-rs [--wait-for-target DURATION] list
+       scry-rs [--pid N | --process NAME] [--wait-for-target DURATION] [--out FILE] <command>
        scry-rs --version
 
 commands: roots | ls <path> | get <path> [depth] | set <path> <json> | help
@@ -39,7 +41,10 @@ commands: roots | ls <path> | get <path> [depth] | set <path> <json> | help
           js <code> | click <selector> | type <selector> <text> | text [selector]
                                        (a Dioxus app's page; selector: CSS, or text=Label)
           screenshot [selector]          (a Dioxus desktop app's page, as a PNG; --out FILE saves it)
-          windows | window <n> <command>   (a Dioxus app's other windows)";
+          windows | window <n> <command>   (a Dioxus app's other windows)
+
+--wait-for-target waits up to DURATION (500ms, 30s, 2m; a bare number is seconds) for a matching
+app to start, instead of failing with no_target at once.";
 
 /// Must match `scry::endpoint::targets_dir`.
 fn targets_dir() -> PathBuf {
@@ -111,6 +116,7 @@ fn main() -> ExitCode {
     let mut pid = None;
     let mut process = None;
     let mut out = None;
+    let mut wait_for_target = Duration::ZERO;
     while let Some(flag) = args.first().cloned() {
         match flag.as_str() {
             "--pid" if args.len() > 1 => {
@@ -128,6 +134,13 @@ fn main() -> ExitCode {
                 out = Some(PathBuf::from(&args[1]));
                 args.drain(..2);
             }
+            "--wait-for-target" if args.len() > 1 => {
+                match parse_duration(&args[1]) {
+                    Some(duration) => wait_for_target = duration,
+                    None => return fail("usage", &format!("'{}' is not a duration, such as 30s or 2m", args[1])),
+                }
+                args.drain(..2);
+            }
             "-h" | "--help" => {
                 println!("{USAGE}");
                 return ExitCode::SUCCESS;
@@ -143,8 +156,13 @@ fn main() -> ExitCode {
         eprintln!("{USAGE}");
         return ExitCode::FAILURE;
     }
+    let matches = |target: &Target| {
+        pid.is_none_or(|pid| target.pid() == pid)
+            && process.as_deref().is_none_or(|name| target.process().eq_ignore_ascii_case(name))
+    };
     if args[0] == "list" {
-        let list: Vec<Value> = targets().iter().map(Target::summary).collect();
+        let list: Vec<Value> =
+            wait_for(wait_for_target, |found| found.iter().any(matches)).iter().map(Target::summary).collect();
         println!("{}", Value::Array(list));
         return ExitCode::SUCCESS;
     }
@@ -153,14 +171,17 @@ fn main() -> ExitCode {
         Ok(command) => command,
         Err(error) => return fail("usage", &error),
     };
-    let candidates: Vec<Target> = targets()
-        .into_iter()
-        .filter(|target| pid.is_none_or(|pid| target.pid() == pid))
-        .filter(|target| process.as_deref().is_none_or(|name| target.process().eq_ignore_ascii_case(name)))
-        .collect();
+    let candidates: Vec<Target> =
+        wait_for(wait_for_target, |found| found.iter().any(matches)).into_iter().filter(matches).collect();
     let target = match candidates.as_slice() {
         [target] => target,
-        [] => return fail("no_target", "no matching running target; see `scry-rs list`"),
+        [] if wait_for_target.is_zero() => return fail("no_target", "no matching running target; see `scry-rs list`"),
+        [] => {
+            return fail(
+                "no_target",
+                &format!("no matching target started within {}; see `scry-rs list`", show_duration(wait_for_target)),
+            );
+        }
         many => {
             let pids: Vec<String> =
                 many.iter().map(|target| format!("{} ({})", target.pid(), target.process())).collect();
@@ -182,6 +203,39 @@ fn main() -> ExitCode {
             if reply["ok"] == true { ExitCode::SUCCESS } else { ExitCode::FAILURE }
         }
         Err(error) => fail("connection_failed", &error),
+    }
+}
+
+/// The running targets, once `ready` accepts them or `timeout` has passed, whichever comes first.
+/// A target appears when its app has started and written its descriptor.
+fn wait_for(timeout: Duration, ready: impl Fn(&[Target]) -> bool) -> Vec<Target> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let found = targets();
+        if ready(&found) || Instant::now() >= deadline {
+            return found;
+        }
+        thread::sleep(Duration::from_millis(250).min(deadline.saturating_duration_since(Instant::now())));
+    }
+}
+
+/// `500ms`, `30s`, `2m`, or a bare number of seconds.
+fn parse_duration(text: &str) -> Option<Duration> {
+    let (number, unit) = text.find(|c: char| !c.is_ascii_digit()).map_or((text, ""), |at| text.split_at(at));
+    let number: u64 = number.parse().ok()?;
+    match unit {
+        "ms" => Some(Duration::from_millis(number)),
+        "" | "s" => Some(Duration::from_secs(number)),
+        "m" => Some(Duration::from_secs(number.checked_mul(60)?)),
+        _ => None,
+    }
+}
+
+fn show_duration(duration: Duration) -> String {
+    match duration.as_millis() {
+        ms if ms % 60_000 == 0 => format!("{}m", ms / 60_000),
+        ms if ms % 1000 == 0 => format!("{}s", ms / 1000),
+        ms => format!("{ms}ms"),
     }
 }
 
@@ -261,4 +315,23 @@ fn decode_base64(text: &str) -> Option<Vec<u8>> {
 fn fail(code: &str, message: &str) -> ExitCode {
     println!("{}", json!({ "ok": false, "error": { "code": code, "message": message } }));
     ExitCode::FAILURE
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn durations() {
+        assert_eq!(parse_duration("90"), Some(Duration::from_secs(90)));
+        assert_eq!(parse_duration("30s"), Some(Duration::from_secs(30)));
+        assert_eq!(parse_duration("2m"), Some(Duration::from_secs(120)));
+        assert_eq!(parse_duration("500ms"), Some(Duration::from_millis(500)));
+        assert_eq!(parse_duration("2h"), None);
+        assert_eq!(parse_duration("s"), None);
+        assert_eq!(parse_duration("-1"), None);
+        assert_eq!(show_duration(Duration::from_secs(120)), "2m");
+        assert_eq!(show_duration(Duration::from_secs(90)), "90s");
+        assert_eq!(show_duration(Duration::from_millis(1500)), "1500ms");
+    }
 }

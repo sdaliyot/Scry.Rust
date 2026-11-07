@@ -37,8 +37,11 @@ What it does:
 - It checks each download against the release's `SHA256SUMS` before installing it.
 - If GitHub can't be reached, it keeps using an installed copy and says so.
 
-Releases exist for Windows, Linux and macOS, each on x64 and Arm64. The binaries are unsigned, so
-Windows SmartScreen or antivirus software may warn the first time.
+Releases exist for Windows, Linux and macOS, each on x64 and Arm64. The binaries are unsigned. What
+the resolver downloads carries no Mark of the Web (Windows) or quarantine flag (macOS), so
+SmartScreen and Gatekeeper don't block it, but antivirus software may still warn the first time.
+If the user downloaded `scry-rs` with a browser instead and it is blocked, the
+[README](https://github.com/sdaliyot/Scry.Rust#manual-install) says how to unblock it.
 
 ### PowerShell (Windows, or `pwsh` anywhere)
 
@@ -78,6 +81,8 @@ function Resolve-ScryRs {
         $expected = (Get-Content (Join-Path $temp 'SHA256SUMS') | Where-Object { $_ -match " $([regex]::Escape($archive))$" }) -split '\s+' | Select-Object -First 1
         $actual = (Get-FileHash (Join-Path $temp $archive) -Algorithm SHA256).Hash
         if (-not $expected -or $expected -ne $actual) { throw "The checksum of $archive doesn't match SHA256SUMS" }
+        # In case the download got the Mark of the Web, which extracting would pass on to scry-rs.exe.
+        if ($windows) { Unblock-File (Join-Path $temp $archive) }
         if ($windows) { Expand-Archive (Join-Path $temp $archive) -DestinationPath $temp }
         else { tar -xzf (Join-Path $temp $archive) -C $temp }
         New-Item -ItemType Directory -Force $dir | Out-Null
@@ -171,8 +176,16 @@ it starts without its styles. `cargo scry` writes to `target/scry`, so it doesn'
 normal build's dependencies. Leave the app running in the background while you use `scry-rs`.
 
 An app writes its descriptor only once it has started, and until then every command fails with
-`no_target`. After starting it, poll `scry-rs list` every second or two until the app appears (a
-first build can take minutes), then use `--pid` with the `pid` it shows.
+`no_target`. After starting it, put `--wait-for-target DURATION` before the first command, so
+`scry-rs` waits for the app instead (`--wait-for-target 5m`: a first build can take minutes):
+
+```sh
+scry-rs --process dx-demo --wait-for-target 5m roots
+```
+
+Name the app with `--process` (its executable's name, without `.exe`) when other apps may be
+running, then use `--pid` with the `pid` that `scry-rs list` shows. If the wait times out, check
+the build's output for errors before waiting again.
 
 If the user already started the app, don't restart it unless they agree: restarting loses the
 state they may want examined.
@@ -369,8 +382,8 @@ After changing how the dx-demo filters its task list. The names (`FILTER`, `ui.A
 app's; in another app, `roots` and `ls` show its own:
 
 ```sh
-cargo scry dx serve --platform desktop        # in the background; wait for `scry-rs list` to show it
-scry-rs set FILTER Done                       # the filter the toolbar sets
+cargo scry dx serve --platform desktop        # in the background
+scry-rs --wait-for-target 5m set FILTER Done  # once the app is up, the filter the toolbar sets
 scry-rs text ul                               # what the page lists now
 scry-rs get ui.App.board.tasks 2              # the state behind it
 scry-rs --out after.png screenshot ul         # what it looks like
@@ -383,7 +396,7 @@ Report what you checked and what you saw. Undo state you changed, unless the use
 
 | Code | Meaning | What to do |
 |---|---|---|
-| `no_target` | No running app matches | Is it running, and built with `cargo scry`? `scry-rs list` |
+| `no_target` | No running app matches | Is it running, and built with `cargo scry`? `scry-rs list`. Just started: `--wait-for-target` |
 | `ambiguous_target` | Several apps match | Add `--pid` |
 | `connection_failed` | The app stopped answering | It may have exited; run `list` again |
 | `target_busy` | The registry's thread didn't answer in 10 s | The UI thread is busy or blocked; retry later |

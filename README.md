@@ -88,11 +88,11 @@ watch its calls, before restarting it away.
 
 ## It in action
 
-An agent checks a change to the dx-demo's task filter. It starts the app, waits until
-`scry-rs list` shows it, and then:
+An agent checks a change to the dx-demo's task filter. It starts the app in the background, and
+then:
 
 ```sh
-scry-rs set FILTER Done                   # the filter the toolbar sets
+scry-rs --wait-for-target 5m set FILTER Done   # once the app is up, the filter the toolbar sets
 scry-rs text ul                           # what the page lists now
 scry-rs get ui.App.board.tasks 2          # the state behind it
 scry-rs --out filtered.png screenshot ul  # and what it looks like
@@ -126,7 +126,8 @@ A failure has the same shape, with a stable code: `{"ok": false, "error": {"code
    release comes out. See "Locating the `scry-rs` command line" in the
    [Skill](skills/scry-rs/SKILL.md).
 
-   *Unsigned binaries:* Windows SmartScreen or antivirus software may warn the first time
+   *Unsigned binaries:* what the Skill downloads isn't marked as coming from the internet, so
+   SmartScreen and Gatekeeper don't block it, but antivirus software may warn the first time
    `scry-rs` runs.
 
 2. **Ask for a check against the running app.** For example:
@@ -153,6 +154,15 @@ To run `scry-rs` yourself, or pin a version in CI:
    `SHA256SUMS` in the same release lists each archive's checksum.
 2. Put `scry-rs` on your `PATH`, or set `SCRY_RS_HOME` to its folder. The Skill uses
    `SCRY_RS_HOME` when it is set, and never downloads over it.
+3. If you downloaded the archive with a browser, clear the mark it gets, since `scry-rs` is
+   unsigned:
+   - **Windows:** the archive carries the Mark of the Web, which extracting it passes on to
+     `scry-rs.exe`, so SmartScreen may block it. Run `Unblock-File` on the archive before extracting,
+     or on `scry-rs.exe` after.
+   - **macOS:** the archive is quarantined, and Gatekeeper refuses to run `scry-rs` ("cannot be
+     opened because the developer cannot be verified"). Run `xattr -d com.apple.quarantine scry-rs`.
+
+   Downloads made with `curl`, `Invoke-WebRequest` or the Skill get no such mark.
 
 `scry-rs` can also be built from source: `cargo install --git https://github.com/sdaliyot/Scry.Rust scry-rs-cli`.
 
@@ -167,7 +177,9 @@ that the `dx` CLI builds uses `cargo scry dx` (see [Apps built with `dx`](#apps-
 A test drives a `cargo scry` build of the app the same way an agent does:
 
 - **Through the command line.** Run `scry-rs` and parse its one line of JSON. Pick the app with
-  `--pid` when a test starts several.
+  `--pid` when a test starts several. Give the first command `--wait-for-target` (such as
+  `--wait-for-target 2m`), so it waits for the app the test just started instead of failing
+  with `no_target`.
 - **Through the protocol.** The endpoint speaks one JSON object per line over TCP on `127.0.0.1`:
   `{"token": "...", "command": "get APP.stats"}` in, `{"ok": true, "result": ...}` out. The command
   is exactly what follows `scry-rs` on the command line. The app's descriptor, in
@@ -456,6 +468,15 @@ scry-rs assert 'FILTER == "All"'                      # fails with assertion_fai
 - **A condition that doesn't compile** fails at once, for both.
 - **The UI isn't blocked.** Through the endpoint, each evaluation is one short trip to the registry
   thread, and the waiting happens elsewhere, so a long wait never holds a Dioxus app's UI thread.
+
+`wait` runs inside the app, so it needs the app running. To wait for the app itself to start, put
+`--wait-for-target DURATION` before any command: `scry-rs` then waits up to that long (`500ms`,
+`30s`, `2m`; a bare number is seconds) for a matching app to write its descriptor, instead of
+failing with `no_target` at once. With `--pid` or `--process`, it waits for that app:
+
+```sh
+scry-rs --process my-app --wait-for-target 2m wait timeout=30 'APP.ready'
+```
 
 ## Calling app code
 
