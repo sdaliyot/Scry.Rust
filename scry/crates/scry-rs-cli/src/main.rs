@@ -26,6 +26,7 @@ use serde_json::{Value, json};
 
 const USAGE: &str = "usage: scry-rs list
        scry-rs [--pid N | --process NAME] [--out FILE] <command>
+       scry-rs --version
 
 commands: roots | ls <path> | get <path> [depth] | set <path> <json> | help
           call <function or path.method> [json args...] | fns [filter]
@@ -129,6 +130,10 @@ fn main() -> ExitCode {
             }
             "-h" | "--help" => {
                 println!("{USAGE}");
+                return ExitCode::SUCCESS;
+            }
+            "-V" | "--version" => {
+                println!("{}", env!("CARGO_PKG_VERSION"));
                 return ExitCode::SUCCESS;
             }
             _ => break,

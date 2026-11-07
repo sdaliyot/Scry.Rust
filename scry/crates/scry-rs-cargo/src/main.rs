@@ -148,6 +148,10 @@ fn subcommand(args: Vec<OsString>) -> ExitCode {
         println!("{USAGE}");
         return ExitCode::SUCCESS;
     }
+    if command == "--version" || command == "-V" {
+        println!("cargo-scry {}", env!("CARGO_PKG_VERSION"));
+        return ExitCode::SUCCESS;
+    }
     let exe = match env::current_exe() {
         Ok(exe) => exe,
         Err(error) => {
