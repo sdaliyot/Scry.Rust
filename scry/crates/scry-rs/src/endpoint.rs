@@ -1,4 +1,4 @@
-//! The in-process endpoint: a loopback TCP listener that runs registry commands for the `scry` CLI.
+//! The in-process endpoint: a loopback TCP listener that runs registry commands for the `scry-rs` CLI.
 //!
 //! The model follows Scry.NET's: the process listens on `127.0.0.1` on a port the OS picks, and
 //! writes a descriptor - pid, port and a random capability token - to a per-user directory
@@ -19,7 +19,7 @@ use std::env;
 use std::fs;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{Ipv4Addr, TcpListener, TcpStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -163,8 +163,28 @@ fn write_descriptor(port: u16, token: &str) -> io::Result<()> {
     // Written aside and renamed, so a client never reads half a descriptor.
     let path = dir.join(format!("{pid}.json"));
     let partial = dir.join(format!("{pid}.json.partial"));
-    fs::write(&partial, descriptor.to_string())?;
+    write_private(&partial, descriptor.to_string().as_bytes())?;
     fs::rename(&partial, &path)
+}
+
+/// Writes a file only its owner can read. The descriptor holds the token, and on Unix a home folder
+/// is often readable by every user, so the file is created with mode 0600 and the folder, when this
+/// user can change it, is made 0700. On Windows the profile folder is already private to the user,
+/// and the file takes that folder's permissions.
+fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        options.mode(0o600);
+        if let Some(dir) = path.parent() {
+            // Best effort: a folder named by `SCRY_RS_TARGETS` may belong to someone else, and the
+            // file's own mode already protects the token.
+            let _ = fs::set_permissions(dir, fs::Permissions::from_mode(0o700));
+        }
+    }
+    options.open(path)?.write_all(bytes)
 }
 
 /// Starts the endpoint with a registry on its own thread. For apps whose roots are all statics
