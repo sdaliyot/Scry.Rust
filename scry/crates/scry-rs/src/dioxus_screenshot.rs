@@ -9,7 +9,7 @@
 //! again, and hidden again after if the app had hidden it.
 //!
 //! The reply is `{format: "png", width, height, base64Data}` (width and height in pixels), plus
-//! `element` - what was captured - for a selector. `scry --out shot.png screenshot ...` writes the
+//! `element` - what was captured - for a selector. `scry-rs --out shot.png screenshot ...` writes the
 //! PNG to a file instead of printing it.
 //!
 //! WebView2 only, so Windows only for now; WKWebView (macOS) and WebKitGTK (Linux) each have a

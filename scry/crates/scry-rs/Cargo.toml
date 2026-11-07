@@ -4,7 +4,13 @@ description = "Inspect and change the state of a running Rust process."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-publish.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
 
 # Code still says `use scry::...` and `#[derive(scry::Reflect)]`; the derive emits `::scry::` paths.
 [lib]
@@ -27,7 +33,7 @@ dioxus-router = ["dioxus", "dep:dioxus-router"]
 dioxus-desktop = ["dioxus", "dep:dioxus-desktop", "dep:webview2-com", "dep:windows-core"]
 
 [dependencies]
-scry-rs-derive = { path = "../scry-rs-derive" }
+scry-rs-derive = { version = "0.1.0", path = "../scry-rs-derive" }
 serde_json.workspace = true
 # Gathers the registrations the generator emits next to each static, across all crates.
 linkme = "0.3"

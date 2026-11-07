@@ -1,9 +1,9 @@
 //! `scry`: talks to running processes built with `cargo scry`.
 //!
 //! ```text
-//! scry list                                  running targets, as JSON
-//! scry [--pid N | --process NAME] <command>  run a registry command in one of them
-//! scry --out shot.png screenshot [selector]   save a Dioxus app's screenshot as a PNG file
+//! scry-rs list                                  running targets, as JSON
+//! scry-rs [--pid N | --process NAME] <command>  run a registry command in one of them
+//! scry-rs --out shot.png screenshot [selector]   save a Dioxus app's screenshot as a PNG file
 //! ```
 //!
 //! A command is what the registry understands - `roots`, `ls <path>`, `get <path> [depth]`,
@@ -24,8 +24,8 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 
-const USAGE: &str = "usage: scry list
-       scry [--pid N | --process NAME] [--out FILE] <command>
+const USAGE: &str = "usage: scry-rs list
+       scry-rs [--pid N | --process NAME] [--out FILE] <command>
 
 commands: roots | ls <path> | get <path> [depth] | set <path> <json> | help
           call <function or path.method> [json args...] | fns [filter]
@@ -155,7 +155,7 @@ fn main() -> ExitCode {
         .collect();
     let target = match candidates.as_slice() {
         [target] => target,
-        [] => return fail("no_target", "no matching running target; see `scry list`"),
+        [] => return fail("no_target", "no matching running target; see `scry-rs list`"),
         many => {
             let pids: Vec<String> =
                 many.iter().map(|target| format!("{} ({})", target.pid(), target.process())).collect();

@@ -14,7 +14,7 @@
 //!   per instantiation the crate calls, found in its MIR; see [`crate::generics`].
 //! - **Dioxus hooks** (crates that depend on `dioxus`): `let x = use_signal(..)` and the other
 //!   state hooks also record their handle under the component's name; see `scry::dioxus_hooks`.
-//! - **Hook points**: a few lines around the body of each hookable function, so `scry hook add`
+//! - **Hook points**: a few lines around the body of each hookable function, so `scry-rs hook add`
 //!   can record its calls; see [`crate::hookpoints`].
 //! - **Endpoint** (executables): started at the top of `main`; in a Dioxus app the components
 //!   `main` launches also pump its requests on the UI thread.

@@ -1,4 +1,4 @@
-//! Gives `scry.exe` its icon on Windows.
+//! Gives `scry-rs.exe` its icon on Windows.
 //!
 //! `assets/scry.res` is compiled ahead of time from `assets/scry.rc`, so building needs no
 //! resource compiler. The MSVC linker takes the `.res` file as it is. After changing the icon,
@@ -11,6 +11,6 @@ fn main() {
     let msvc = std::env::var("CARGO_CFG_TARGET_ENV").is_ok_and(|env| env == "msvc");
     if windows && msvc {
         let res = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets").join("scry.res");
-        println!("cargo:rustc-link-arg-bin=scry={}", res.display());
+        println!("cargo:rustc-link-arg-bin=scry-rs={}", res.display());
     }
 }

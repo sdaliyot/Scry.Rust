@@ -125,7 +125,7 @@ pub trait Reflect {
 
     /// Methods Scry itself offers on this value, by signature: a library handle's operations that
     /// the app's own code reaches through methods the generator can't make callable (a Dioxus
-    /// resource's `restart`). `scry call <path>.<name>` runs them through [`Reflect::call_builtin`].
+    /// resource's `restart`). `scry-rs call <path>.<name>` runs them through [`Reflect::call_builtin`].
     fn builtin_methods(&self) -> Vec<&'static str> {
         Vec::new()
     }

@@ -7,7 +7,7 @@
 //! `#[derive(Routable)]` enum publishes its site map through it.
 //!
 //! The router's history is reachable as well: `ui.can_go_back` and `ui.can_go_forward` read it, and
-//! the built-in functions `scry::ui::back` and `scry::ui::forward` (`scry call ui::back`, `back()`
+//! the built-in functions `scry::ui::back` and `scry::ui::forward` (`scry-rs call ui::back`, `back()`
 //! in a script) step through it, as the browser's buttons would.
 
 use dioxus_router::{NavigationTarget, RouterContext, SegmentType, SiteMapSegment, root_router};

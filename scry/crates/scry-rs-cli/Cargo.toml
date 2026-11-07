@@ -4,10 +4,17 @@ description = "The scry command line: inspect and change running Scry.Rust proce
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-publish.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+keywords.workspace = true
+categories.workspace = true
+publish = false
+# Released as a download on GitHub, not on crates.io.
 
 [[bin]]
-name = "scry"
+name = "scry-rs"
 path = "src/main.rs"
 
 [dependencies]

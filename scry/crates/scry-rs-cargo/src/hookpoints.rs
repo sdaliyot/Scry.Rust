@@ -1,4 +1,4 @@
-//! Hook points: the lines around a function's body that let `scry hook add` record its calls.
+//! Hook points: the lines around a function's body that let `scry-rs hook add` record its calls.
 //!
 //! The body stays where it is, line for line. A prefix goes after the opening brace and a suffix
 //! before the closing one:

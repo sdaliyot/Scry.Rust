@@ -1,5 +1,5 @@
 //! Call shims: a `scry::__private::Function` next to every function and method that can be called
-//! from outside, so scripts and `scry call` can run app code.
+//! from outside, so scripts and `scry-rs call` can run app code.
 //!
 //! A shim builds each argument from JSON, makes the call, and snapshots the result. It is a
 //! `static` in the function's own module, placed after the item on its last line, so private

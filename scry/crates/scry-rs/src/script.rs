@@ -208,7 +208,7 @@ fn engine(registry: &Rc<Registry>, printed: &Rc<RefCell<Vec<String>>>) -> Engine
     }
 
     // Hooks, without `hook_wait`: a script runs on the registry's thread - a Dioxus app's UI
-    // thread - so waiting there would stop the calls it waits for. `scry hook wait` waits elsewhere.
+    // thread - so waiting there would stop the calls it waits for. `scry-rs hook wait` waits elsewhere.
     let hook = |line: String| -> Result<Dynamic, Box<EvalAltResult>> {
         match crate::hooks::command(&line) {
             Some(result) => result.map(|value| to_dynamic(&value)).map_err(raise),
