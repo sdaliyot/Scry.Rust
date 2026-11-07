@@ -1,0 +1,90 @@
+name: Bug report
+description: Something in Scry.Rust isn't behaving as documented.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please fill in every field. A report that only says "not working" can't be acted on, and
+        will be closed with a request to resubmit it with these details.
+
+  - type: input
+    id: version
+    attributes:
+      label: Scry.Rust version or commit
+      description: The crate version or release tag (e.g. 0.1.0), or the commit hash if you built from source.
+      placeholder: 0.1.0
+    validations:
+      required: true
+
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - Windows
+        - Linux
+        - macOS
+    validations:
+      required: true
+
+  - type: dropdown
+    id: app-kind
+    attributes:
+      label: App
+      options:
+        - Dioxus desktop app
+        - Dioxus app on another platform
+        - Console, service or other app
+    validations:
+      required: true
+
+  - type: input
+    id: rust
+    attributes:
+      label: Rust version
+      description: The output of `rustc --version`.
+    validations:
+      required: true
+
+  - type: textarea
+    id: command
+    attributes:
+      label: Exact command
+      description: The exact `cargo scry ...` or `scry-rs ...` command that produced the problem.
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected result
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual result
+      description: The full output or JSON reply, not a paraphrase. For a build problem, run with `SCRY_VERBOSE=1`.
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: A minimal app, if the problem depends on one.
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Anything else
+      description: Other logs or context, such as the relevant part of `scry-report.txt`.
+      render: shell
+    validations:
+      required: false

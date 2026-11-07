@@ -9,7 +9,7 @@
 //! a `scry` feature, and is built with `cargo scry` (the `scry-rs-cargo` crate), which compiles a
 //! rewritten copy of its sources: `#[derive(Reflect)]` on every type, a registration for every
 //! static, reflection for trait objects and Dioxus hooks, and an [`endpoint`] started from `main`
-//! for the `scry` CLI. The derive and [`Registry`] can also be used by hand. With the default
+//! for the `scry-rs` CLI. The derive and [`Registry`] can also be used by hand. With the default
 //! `script` feature, [`execute`] also runs Rhai scripts over the registry (`eval <script>`).
 //!
 //! Two rules shape the API, both forced by Rust rather than chosen:

@@ -1,44 +1,236 @@
-# Scry.Rust (POC)
+# Scry.Rust
 
-Inspect and change the state of a running Rust process, with no Scry code in the app's sources.
+<img src="assets/scry-rs-logo.png" alt="Scry.Rust logo" width="140" align="left" style="margin-right: 15px; margin-bottom: 10px;"/>
 
-## Layout
+**Scry.Rust gives a running Rust app what the DevTools protocol gives a web page: a live handle on
+it from the outside. Read and change its state, call its functions, record and change its calls,
+and drive a Dioxus app's pages. AI agents can check their own work against the real app, through
+the [agent Skill](skills/scry-rs/SKILL.md) that ships with it, instead of reasoning about what a
+change probably did. Tests can reach past the UI into the state behind it. And an app stuck in a
+bad state can be examined while it is stuck, instead of restarted in the hope of catching it next
+time.**
 
-| Folder | What |
-|---|---|
-| `scry/crates/scry-rs` | The runtime library (imported as `scry`): `Reflect`, `Registry`, the endpoint |
-| `scry/crates/scry-rs-derive` | `#[derive(Reflect)]` |
-| `scry/crates/scry-rs-cargo` | `cargo scry`: builds an app with a generated registry |
-| `scry/crates/scry-rs-cli` | `scry`: the command line that talks to running apps |
-| `demos/` | A console app and a Dioxus desktop app to try it on |
+<br clear="left"/>
 
-None of the crates is published yet. `scry` is taken on crates.io; `scry-rs` and `scry-rs-derive` are free.
+Build an app with `cargo scry` instead of `cargo`, and it carries a registry of its own code: every
+static, every type, every function, and in a Dioxus app every component's state. The `scry-rs`
+command line talks to it while it runs, over a local, token-protected endpoint:
 
-## Opting an app in
+```sh
+scry-rs get APP.inventory.items[0]              # read live state, through the app's own locks
+scry-rs set APP.rules[0].percent 25             # change it
+scry-rs call APP.inventory.total_value_cents    # call the app's own code on the live value
+scry-rs hook wait 1 'args.index == 2'           # wait for a call to a function, and see its arguments
+scry-rs click text=Add                          # drive a Dioxus app's page, as a user would
+scry-rs --out page.png screenshot               # and see it, even with the window minimized
+```
 
-Only the manifest changes:
+**Nothing in the app's source changes.** The app adds an optional dependency to its manifest, and
+`cargo scry` generates the rest into a copy of the code at build time. A plain `cargo build` is
+unchanged and contains no Scry code at all.
+
+**It is not only for UI apps.** A console app, a service or a background worker gets the same
+registry, scripts, calls, hooks, `wait` and `assert`. The Dioxus support adds routes, pages and
+screenshots on top.
+
+It runs on Windows, Linux and macOS, with Rust 1.91 or later. Screenshots are Windows-only for now.
+
+## How an app opts in
+
+Scry.Rust is a build-time opt-in. Nothing is injected into a running process: an app has an endpoint
+only when it was built for it. That takes two things.
+
+**The manifest declares an optional dependency and a feature:**
 
 ```toml
 [features]
 scry = ["dep:scry"]
 
 [dependencies]
-scry = { package = "scry-rs", path = "…/scry/crates/scry-rs", optional = true }
+scry = { package = "scry-rs", version = "0.1", optional = true }
 # A Dioxus app adds: features = ["dioxus"]
 ```
 
-A normal `cargo build` is unchanged. `cargo scry build` (or `run`, `test`, …) builds the same code with
-the registry generated in. It writes to `target/scry`, so the normal and Scry builds don't rebuild each other's dependencies.
-`cargo scry clippy [args] [-- lint args]` lints the rewritten code. The generated parts allow every
-lint group, so only the app's own code is reported.
+**The app is built with `cargo scry`:**
 
-### Apps built with `dx`
+```sh
+cargo install scry-rs-cargo
+cargo scry run          # or build, test, clippy, ...
+```
+
+`cargo scry` runs the cargo command with `--features scry`, and compiles a rewritten copy of each
+opted-in crate instead of the original (see [What gets generated](#what-gets-generated)). The copy
+keeps every line where it was, so errors, panics and the debugger still point at the original
+files. Builds go to `target/scry`, so the normal build and the Scry build don't rebuild each
+other's dependencies.
+
+The registry knows the app's code as written: its statics and their types, its functions, its
+Dioxus hooks. So an agent or a test reaches state by the names the code gives it
+(`APP.inventory.items[2].qty`), and calls the functions the code defines. Nothing has to be
+registered by hand.
+
+## How it gets used
+
+**An AI agent checking its own work.** An agent that just changed code runs the app with
+`cargo scry`, then reads the live state back, navigates to the page it changed, checks the text the
+page shows and takes a screenshot of it. The workflow is in
+[`skills/scry-rs/SKILL.md`](skills/scry-rs/SKILL.md).
+
+**Tests that reach further than UI automation.** UI automation sees only what the page or the
+accessibility tree shows. A test with Scry.Rust can click the real buttons *and* assert on the
+state behind them, wait for the app to reach a state instead of sleeping, and inject a fault into
+one function call to see how the app copes.
+
+**An app stuck in a bad state.** Every so often a long-running app ends up somewhere it shouldn't:
+not crashed, not quite working either. A restart clears it, and also loses the state that got it
+there. If it runs as a `cargo scry` build, you can read that state directly, call its functions and
+watch its calls, before restarting it away.
+
+## It in action
+
+An agent checks a change to the dx-demo's task filter. It starts the app, waits until
+`scry-rs list` shows it, and then:
+
+```sh
+scry-rs set FILTER Done                   # the filter the toolbar sets
+scry-rs text ul                           # what the page lists now
+scry-rs get ui.App.board.tasks 2          # the state behind it
+scry-rs --out filtered.png screenshot ul  # and what it looks like
+scry-rs set FILTER All                    # put it back
+```
+
+Each command prints one line of JSON. `text ul` answers `{"ok": true, "result": "Install Rust (High)"}`,
+and the screenshot:
+
+```json
+{"ok": true, "result": {"element": {"tag": "ul", "id": null, "text": "Install Rust (High)"}, "file": "C:\work\filtered.png", "format": "png", "width": 1492, "height": 21, "bytes": 1503}}
+```
+
+A failure has the same shape, with a stable code: `{"ok": false, "error": {"code": "not_writable",
+"message": "..."}}`. The exit code is 0 when `ok` is true.
+
+## Getting started
+
+### For AI agents
+
+1. **Install the Skill in your agent.** Claude Code, GitHub Copilot, OpenAI Codex, Cursor and other
+   agents can install it themselves. Prompt the agent with:
+
+   > *"Globally install or update the SKILL from: https://github.com/sdaliyot/Scry.Rust/blob/main/skills/scry-rs/SKILL.md"*
+
+   Send the same prompt again later to update it.
+
+   There is nothing to download by hand. The Skill's resolver downloads the `scry-rs` build for your
+   platform from the [latest release](https://github.com/sdaliyot/Scry.Rust/releases/latest) the
+   first time it is needed, checks it against the release's checksums, and updates it when a newer
+   release comes out. See "Locating the `scry-rs` command line" in the
+   [Skill](skills/scry-rs/SKILL.md).
+
+   *Unsigned binaries:* Windows SmartScreen or antivirus software may warn the first time
+   `scry-rs` runs.
+
+2. **Ask for a check against the running app.** For example:
+
+   > *"I changed how the cart applies discounts. Run the app with cargo scry, add two items to the
+   > cart, and check that the total the page shows and the cart's state both reflect the 15%
+   > discount."*
+
+   The agent asks before it adds the `scry` feature to your manifest or installs `cargo scry`.
+
+#### Manual install
+
+To run `scry-rs` yourself, or pin a version in CI:
+
+1. Download the archive for your platform from the
+   [latest release](https://github.com/sdaliyot/Scry.Rust/releases/latest):
+
+   | Platform | Archive |
+   |---|---|
+   | Windows x64 / Arm64 | `scry-rs-x86_64-pc-windows-msvc.zip` / `scry-rs-aarch64-pc-windows-msvc.zip` |
+   | Linux x64 / Arm64 | `scry-rs-x86_64-unknown-linux-gnu.tar.gz` / `scry-rs-aarch64-unknown-linux-gnu.tar.gz` |
+   | macOS Intel / Apple silicon | `scry-rs-x86_64-apple-darwin.tar.gz` / `scry-rs-aarch64-apple-darwin.tar.gz` |
+
+   `SHA256SUMS` in the same release lists each archive's checksum.
+2. Put `scry-rs` on your `PATH`, or set `SCRY_RS_HOME` to its folder. The Skill uses
+   `SCRY_RS_HOME` when it is set, and never downloads over it.
+
+`scry-rs` can also be built from source: `cargo install --git https://github.com/sdaliyot/Scry.Rust scry-rs-cli`.
+
+### For your app
+
+Add the optional dependency and feature shown in [How an app opts in](#how-an-app-opts-in), install
+`cargo scry` with `cargo install scry-rs-cargo`, and build or run with `cargo scry`. A Dioxus app
+that the `dx` CLI builds uses `cargo scry dx` (see [Apps built with `dx`](#apps-built-with-dx)).
+
+### For automated tests
+
+A test drives a `cargo scry` build of the app the same way an agent does:
+
+- **Through the command line.** Run `scry-rs` and parse its one line of JSON. Pick the app with
+  `--pid` when a test starts several.
+- **Through the protocol.** The endpoint speaks one JSON object per line over TCP on `127.0.0.1`:
+  `{"token": "...", "command": "get APP.stats"}` in, `{"ok": true, "result": ...}` out. The command
+  is exactly what follows `scry-rs` on the command line. The app's descriptor, in
+  `~/.scry-rs/targets/<pid>.json`, gives its `address` and `token`.
+
+`wait` and `assert` are made for tests: gate on a state instead of sleeping, and fail with
+`assertion_failed` when a condition doesn't hold.
+
+## Architecture
+
+```mermaid
+%%{init: {"flowchart": {"subGraphTitleMargin": {"top": 6, "bottom": 12}}} }%%
+flowchart TB
+  subgraph build["Build time"]
+    direction LR
+    cs["cargo scry"]
+    wr["cargo-scry as the rustc wrapper<br/>rewrites each opted-in crate's sources"]
+    cs --> wr
+  end
+
+  subgraph tool["Tool process: an agent's shell, or a test"]
+    cli["scry-rs, the JSON command line<br/>or your own test code"]
+  end
+
+  subgraph app["Your app's process"]
+    gen["Generated code<br/>derives, registrations, call shims, hook points"]
+    rt["scry-rs runtime<br/>registry, scripts, hooks, Dioxus support"]
+    ep["Endpoint<br/>127.0.0.1, random port, token"]
+    gen --> rt
+    rt --> ep
+  end
+
+  desc["Descriptor<br/>~/.scry-rs/targets/&lt;pid&gt;.json<br/>pid, address, token"]
+
+  wr -. "compiles into" .-> gen
+  ep -. "writes at startup" .-> desc
+  cli -- "reads" --> desc
+  cli == "one JSON line per request" ==> ep
+```
+
+| Component | Runs in | What it does |
+|---|---|---|
+| [`scry-rs-cargo`](scry/crates/scry-rs-cargo) (`cargo scry`) | your build | Runs cargo with `--features scry` and itself as the rustc wrapper, and compiles a rewritten copy of each opted-in crate |
+| [`scry-rs`](scry/crates/scry-rs) | your app | The runtime: the `Reflect` trait, the registry, paths, scripts, calls, hooks, the Dioxus support and the endpoint |
+| [`scry-rs-derive`](scry/crates/scry-rs-derive) | your build | `#[derive(Reflect)]`, which the generated code puts on every type |
+| [`scry-rs-cli`](scry/crates/scry-rs-cli) (`scry-rs`) | your shell | The command line: finds running apps through their descriptors and sends them commands |
+
+The protocol is strictly request and response: the app never sends anything first. Even
+`hook wait` and `wait` are answered late rather than pushed.
+
+Commands run on the registry's thread, which in a Dioxus app is the UI thread, so they see the
+state exactly as the app's own code does. Waiting (`wait`, `hook wait`) happens on the endpoint's
+connection thread instead, so a long wait never holds the UI.
+
+See [`docs/development.md`](docs/development.md) for how the pieces work inside.
+
+## Apps built with `dx`
 
 A Dioxus app that loads files with `asset!()` (stylesheets, icons, scripts) has to be built by the
 Dioxus CLI: only `dx` bundles those files and fills in their URLs. Built with plain cargo, the app
 starts but its assets come back 404, so it shows unstyled. For these apps, put `dx` after `cargo scry`:
 
-```powershell
+```sh
 cargo scry dx build --platform desktop --features desktop
 cargo scry dx serve --platform desktop      # likewise for serve, bundle, ...
 ```
@@ -52,39 +244,52 @@ the system temp folder, in a `scry-rustc` folder, one copy per build of `cargo-s
 cargo's own probes get the real `rustc` through `RUSTC`. Hot patching (`dx serve --hot-patch`)
 compiles patches with its own rustc call, and these patches get no Scry code.
 
+
 ## Trying it
 
-```powershell
-cd scry; cargo build -p scry-rs-cargo -p scry-rs-cli; cd ..\demos
-..\scry\target\debug\cargo-scry.exe scry run -p console-demo
+The repository has two demo apps: `console-demo`, a console app with shared state, third-party types
+and generic functions, and `dx-demo`, a Dioxus desktop app with a router, several windows and
+error boundaries. From a clone:
+
+```sh
+cargo install --path scry/crates/scry-rs-cargo
+cargo install --path scry/crates/scry-rs-cli
+cd demos
+cargo scry run -p console-demo
 ```
 
-In another terminal (`scry` is `scry\target\debug\scry.exe`):
+In another terminal:
 
-```powershell
-scry list
-scry roots
-scry get APP.stats
-scry set APP.rules[0].percent 50
-scry set DISCOUNTS_ENABLED false
+```sh
+scry-rs list
+scry-rs roots
+scry-rs get APP.stats
+scry-rs set APP.rules[0].percent 50
+scry-rs set DISCOUNTS_ENABLED false
 ```
 
-With `cargo-scry.exe` and `scry.exe` on `PATH` (for example via `cargo install --path`), the first command
-becomes `cargo scry run -p console-demo`.
+`cargo scry run -p dx-demo` starts the Dioxus demo. Its component state is under `ui`
+(`scry-rs get ui`, `scry-rs set ui.App.uptime 1000`), and its filter is the global `FILTER`
+(`scry-rs set FILTER Done`).
 
-For `dx-demo`, the component signals are under `ui`: `scry get ui`, `scry set ui.App.uptime 1000`,
-`scry set FILTER Done`.
+## Dioxus apps
+
+A Dioxus app's component state is under `ui`, as `ui.<Component>.<binding>`: the results of
+`use_signal`, `use_signal_sync`, `use_context_provider`, `use_root_context`, `use_memo`,
+`use_resource` and `use_action`. A `GlobalSignal` static is a root of its own, like any static.
+With the `dioxus` feature (`features = ["dioxus"]` on the dependency), the endpoint also reaches the
+app's router, its page and its windows.
 
 ### Pages (the Dioxus router)
 
 In an app with a Dioxus router, `ui` also has the router's state:
 
-```powershell
-scry get ui.route                 # the current route, as its URL: "/tasks/3"
-scry get ui.routes                # the patterns the app declares: ["/", "/tasks/:id", "/about"]
-scry set ui.route '"/about"'      # navigate, as a Link would; Back returns to the previous page
-scry get ui.can_go_back           # whether there is a previous page (ui.can_go_forward: a next one)
-scry call ui::back                # the previous page, as the Back button would; ui::forward likewise
+```sh
+scry-rs get ui.route                 # the current route, as its URL: "/tasks/3"
+scry-rs get ui.routes                # the patterns the app declares: ["/", "/tasks/:id", "/about"]
+scry-rs set ui.route '"/about"'      # navigate, as a Link would; Back returns to the previous page
+scry-rs get ui.can_go_back           # whether there is a previous page (ui.can_go_forward: a next one)
+scry-rs call ui::back                # the previous page, as the Back button would; ui::forward likewise
 ```
 
 Setting `ui.route` checks the URL against the declared patterns first, and refuses one that matches
@@ -106,12 +311,12 @@ Event handlers are closures inside the rendered tree, which the registry can't r
 with a webview can be driven through its page instead, where the app's own handlers run just as
 they do for a user:
 
-```powershell
-scry click text=Add                       # the innermost visible element showing "Add", in any case
-scry click "li:nth-child(2) input"        # or any CSS selector; the first visible match
-scry type "input[name=title]" Buy milk    # sets the value and fires input and change
-scry text                                 # the page's visible text; `text <selector>` for one element
-scry js "return document.title"           # any JavaScript, run as an async function's body
+```sh
+scry-rs click text=Add                       # the innermost visible element showing "Add", in any case
+scry-rs click "li:nth-child(2) input"        # or any CSS selector; the first visible match
+scry-rs type "input[name=title]" Buy milk    # sets the value and fires input and change
+scry-rs text                                 # the page's visible text; `text <selector>` for one element
+scry-rs js "return document.title"           # any JavaScript, run as an async function's body
 ```
 
 `click` and `type` return the element they acted on (`{tag, id, text}`, or `checked` for a
@@ -127,11 +332,11 @@ available inside `eval` scripts.
 `screenshot` returns what a Dioxus desktop window shows, as a PNG: the visible page, or one
 element, named by a selector as for `click`.
 
-```powershell
-scry --out page.png screenshot                    # the window's viewport
-scry --out list.png screenshot ul                 # one element, at its own size
-scry --out row.png screenshot "text=Build the demos"
-scry --out notes.png window 1 screenshot          # another window
+```sh
+scry-rs --out page.png screenshot                    # the window's viewport
+scry-rs --out list.png screenshot ul                 # one element, at its own size
+scry-rs --out row.png screenshot "text=Build the demos"
+scry-rs --out notes.png window 1 screenshot          # another window
 ```
 
 The reply is `{format: "png", width, height, base64Data}`, plus `element` for a selector. `--out`
@@ -156,11 +361,11 @@ A component error - a route that doesn't parse (`/tasks/abc` for `/tasks/:id` wi
 event handler that returns `Err` - goes to the nearest error boundary, which shows it in place of its
 children until it is cleared. `ui.errors` lists what the window's boundaries are showing:
 
-```powershell
-scry set ui.route '"/tasks/abc"'          # accepted: it fits /tasks/:id; whether :id parses is the app's call
-scry get ui.errors                        # ["Failed to parse route ..."]
-scry set ui.route '"/"'                   # somewhere that renders, then
-scry call ui::clear_errors                # clears the boundaries, which render their children again
+```sh
+scry-rs set ui.route '"/tasks/abc"'          # accepted: it fits /tasks/:id; whether :id parses is the app's call
+scry-rs get ui.errors                        # ["Failed to parse route ..."]
+scry-rs set ui.route '"/"'                   # somewhere that renders, then
+scry-rs call ui::clear_errors                # clears the boundaries, which render their children again
 ```
 
 Scry sees the root boundary every virtual dom has, and each `ErrorBoundary` a tracked component
@@ -173,12 +378,12 @@ component.
 `use_resource` and `use_action` handles are tracked like signals, read-only, with the operations the
 app's own code would call on them:
 
-```powershell
-scry get ui.About.stats                   # {state: "Ready", value: ...}; state is Pending, Ready, Paused or Stopped
-scry call ui.About.stats.restart          # runs the future again; also cancel, pause, resume, clear
-scry get ui.About.clear_done              # {pending: false, value: 1}, or value {error: ...} after a failure
-scry call ui.About.clear_done.call        # runs an action whose closure takes no arguments
-scry call ui.About.clear_done.reset       # forgets the last value; cancel stops a run in progress
+```sh
+scry-rs get ui.About.stats                   # {state: "Ready", value: ...}; state is Pending, Ready, Paused or Stopped
+scry-rs call ui.About.stats.restart          # runs the future again; also cancel, pause, resume, clear
+scry-rs get ui.About.clear_done              # {pending: false, value: 1}, or value {error: ...} after a failure
+scry-rs call ui.About.clear_done.call        # runs an action whose closure takes no arguments
+scry-rs call ui.About.clear_done.reset       # forgets the last value; cancel stops a run in progress
 ```
 
 `ls` lists these under `methods`. In a script they are methods too (`ui.About.stats.restart()`),
@@ -192,11 +397,11 @@ A Dioxus desktop app can open more windows (`window().new_window(VirtualDom::new
 each with a virtual dom, state and router of its own. Scry numbers them in the order it first sees
 a component of theirs keep state, starting from 0, the window that runs the endpoint:
 
-```powershell
-scry windows                                  # [{window: 0, components: [App], route: "/about"}, {window: 1, components: [Notes]}]
-scry window 1 get ui                          # any command, run in window 1: its ui, its route
-scry window 1 type textarea "Hello"           # its page
-scry window 1 eval "ui.Notes.note.len()"
+```sh
+scry-rs windows                                  # [{window: 0, components: [App], route: "/about"}, {window: 1, components: [Notes]}]
+scry-rs window 1 get ui                          # any command, run in window 1: its ui, its route
+scry-rs window 1 type textarea "Hello"           # its page
+scry-rs window 1 eval "ui.Notes.note.len()"
 ```
 
 Without `window <n>`, a command runs in window 0, as before. A closed window leaves the list, and
@@ -204,8 +409,8 @@ the windows after it move up a number; check `windows` again after closing one.
 
 ## Scripts
 
-`scry eval <script>` runs a [Rhai](https://rhai.rs) script in the app (`scry eval --file x.rhai`, or
-`scry eval -` for stdin). Roots are variables, members are reached as in Rust, and assignments write
+`scry-rs eval <script>` runs a [Rhai](https://rhai.rs) script in the app (`scry-rs eval --file x.rhai`, or
+`scry-rs eval -` for stdin). Roots are variables, members are reached as in Rust, and assignments write
 through the same rules as `set`:
 
 ```rhai
@@ -235,10 +440,10 @@ A script runs on the registry's thread, which is the UI thread in a Dioxus app. 
 `wait` and `assert` check a Rhai condition against the app's state. A test or an agent can gate on
 the app reaching a state, or fail when it hasn't:
 
-```powershell
-scry wait timeout=15 'APP.stats.sold >= 10'        # {"satisfied": true, "attempts": 26, "elapsedMs": 2750}
-scry wait timeout=1 'APP.inventory.len() == 99'    # {"satisfied": false, "lastValue": false, ...}
-scry assert 'FILTER == "All"'                      # fails with assertion_failed when it doesn't hold
+```sh
+scry-rs wait timeout=15 'APP.stats.sold >= 10'        # {"satisfied": true, "attempts": 26, "elapsedMs": 2750}
+scry-rs wait timeout=1 'APP.inventory.len() == 99'    # {"satisfied": false, "lastValue": false, ...}
+scry-rs assert 'FILTER == "All"'                      # fails with assertion_failed when it doesn't hold
 ```
 
 - **`wait`** evaluates the condition every `interval` (100 ms by default) until it gives `true`, or
@@ -256,12 +461,12 @@ scry assert 'FILTER == "All"'                      # fails with assertion_failed
 
 `cargo scry` also makes the app's functions and methods callable, with no attributes needed:
 
-```powershell
-scry fns inventory                          # callable functions, filtered by path
-scry ls APP.inventory                       # members, and the methods of the value there
-scry call APP.inventory.total_value_cents   # a method on the live value
-scry call util::format_cents 12345          # a free function; arguments are JSON values
-scry call Discount::new '"promo"' 15        # an associated function (a constructor)
+```sh
+scry-rs fns inventory                          # callable functions, filtered by path
+scry-rs ls APP.inventory                       # members, and the methods of the value there
+scry-rs call APP.inventory.total_value_cents   # a method on the live value
+scry-rs call util::format_cents 12345          # a free function; arguments are JSON values
+scry-rs call Discount::new '"promo"' 15        # an associated function (a constructor)
 ```
 
 In scripts, methods use method syntax and free functions are called by name when the name is
@@ -291,7 +496,7 @@ Callable means:
 Some parameters and functions are handled specially:
 - **`&mut` parameters:** the argument is built from JSON (a `Vec` for `&mut [T]`, a `String` for
   `&mut str`) and lent to the call. The reply then also holds the values it was left with:
-  `scry call clamp_all::<i64> [5,-3,2000000] 1 1000000` gives
+  `scry-rs call clamp_all::<i64> [5,-3,2000000] 1 1000000` gives
   `{"result": null, "args": {"values": [5, 1, 1000000]}}`.
 - **`impl Trait` parameters:** a type is picked when it's sure to meet the bounds:
   - `impl Into<T>` and `impl Borrow<T>` take a `T`
@@ -340,10 +545,10 @@ A generic function or impl gets one shim for each set of concrete types the crat
 with. To find those, `cargo scry` has rustc compile the crate once more to MIR only (the stable
 `--emit=mir`) and reads the calls from it:
 
-```powershell
-scry fns describe                           # util::describe::<Item>, util::describe::<Stats>
-scry call ratio 1 4                         # the only instantiation answers to the plain name
-scry eval 'APP.labels.get(999)'             # Cache<u32, String>::get on the live cache
+```sh
+scry-rs fns describe                           # util::describe::<Item>, util::describe::<Stats>
+scry-rs call ratio 1 4                         # the only instantiation answers to the plain name
+scry-rs eval 'APP.labels.get(999)'             # Cache<u32, String>::get on the live cache
 ```
 
 - An instantiation is listed with its type arguments, such as `describe::<Item>`. When there are
@@ -373,15 +578,15 @@ scry eval 'APP.labels.get(999)'             # Cache<u32, String>::get on the liv
 
 ## Hooking calls
 
-Every hookable function in a `cargo scry` build has a hook point compiled in. `scry hook add` turns
+Every hookable function in a `cargo scry` build has a hook point compiled in. `scry-rs hook add` turns
 on recording for one function: each call's arguments, result or panic, duration and thread.
 
-```powershell
-scry hooks inventory                                   # hookable functions, and which are hooked
-scry hook add Inventory::sell_one self=true            # returns {"hook": 1, ...}
-scry hook wait 1 timeout=60 'result != () && args.index == 2'
-scry hook read 1                                       # every recorded call, with a cursor for the next read
-scry hook remove 1
+```sh
+scry-rs hooks inventory                                   # hookable functions, and which are hooked
+scry-rs hook add Inventory::sell_one self=true            # returns {"hook": 1, ...}
+scry-rs hook wait 1 timeout=60 'result != () && args.index == 2'
+scry-rs hook read 1                                       # every recorded call, with a cursor for the next read
+scry-rs hook remove 1
 ```
 
 - **Snapshots:** arguments and results are snapshots taken during the call, `depth=2` levels deep by
@@ -403,11 +608,11 @@ scry hook remove 1
 A hook can also change the calls it sees. Use this for fault injection ("make the next sale fail"),
 for stubbing a slow dependency, or for steering the app into a state that's hard to reach:
 
-```powershell
-scry hook before 1 'if args.index == 0 { #{ args: #{ index: 4 } } }'   # change an argument
-scry hook before 2 '#{ result: () }'                                    # skip the body, return ()
-scry hook after 3 'if args.id == 7 { #{ result: #{ Err: "injected" } } }'   # replace the result
-scry hook before 1                                                      # an empty script removes it
+```sh
+scry-rs hook before 1 'if args.index == 0 { #{ args: #{ index: 4 } } }'   # change an argument
+scry-rs hook before 2 '#{ result: () }'                                    # skip the body, return ()
+scry-rs hook after 3 'if args.id == 7 { #{ result: #{ Err: "injected" } } }'   # replace the result
+scry-rs hook before 1                                                      # an empty script removes it
 ```
 
 - **When scripts run:** a `before` script runs on the calling thread before the body, with `args`
@@ -466,10 +671,10 @@ field, argument or result. Nothing here names a crate, so any type with these tr
 
 Example, from the console demo, with no Scry code for `parking_lot`, `uuid` or `chrono`:
 
-```powershell
-scry get APP.session                                  # {"id": "7516…", "opened": "2026-11-05T14:30:16Z", "cashier": null}
-scry set APP.session.opened 2026-01-01T09:30:00Z      # through the parking_lot lock and chrono's serde impls
-scry set APP.session.id not-a-uuid                    # type_mismatch: UUID parsing failed: invalid character…
+```sh
+scry-rs get APP.session                                  # {"id": "7516…", "opened": "2026-11-05T14:30:16Z", "cashier": null}
+scry-rs set APP.session.opened 2026-01-01T09:30:00Z      # through the parking_lot lock and chrono's serde impls
+scry-rs set APP.session.id not-a-uuid                    # type_mismatch: UUID parsing failed: invalid character…
 ```
 
 **Locks** can't be handled generically: their contents are only safe to read through their own
@@ -489,9 +694,9 @@ the source. This covers fields and statics whose types are made of:
 
 What sits inside gets the rules in the table, so this works:
 
-```powershell
-scry get APP.quiet                 # ["Regex(\"^Nothing$\")"]  - a parking_lot::RwLock<Vec<regex::Regex>>
-scry set APP.quiet[0] ^Hammer      # parsed with Regex's FromStr, written under the lock
+```sh
+scry-rs get APP.quiet                 # ["Regex(\"^Nothing$\")"]  - a parking_lot::RwLock<Vec<regex::Regex>>
+scry-rs set APP.quiet[0] ^Hammer      # parsed with Regex's FromStr, written under the lock
 ```
 
 Each element can be written, and assigning to an `Option` that is `None` builds the value. A
@@ -523,7 +728,7 @@ every line where it was, so errors, panics and the debugger still point at the o
 - a registration for every non-`mut` static, by its full path (`console_demo::APP`, also reachable as `APP`).
   A `#[cfg]` on the static is copied to its registration.
 - a read-only registration for every named `const` (`SAMPLE`, `const _` excluded), marked
-  `"const": true` in `scry roots`. A const has no address: each use gets its own copy, built into the
+  `"const": true` in `scry-rs roots`. A const has no address: each use gets its own copy, built into the
   program. The registration evaluates it once into a copy that can be read like a static, but every
   write is refused with `not_writable`, even through a `Mutex` inside it, since changing the copy
   would change nothing the app uses. Associated consts (`impl X { const N: u8 = 1; }`) aren't
@@ -554,6 +759,36 @@ it reads through, or a Dioxus global signal read without the runtime (that one i
 
 Type names are shown short (`Vec<Item>`); `ls` also gives the full one as `fullType`.
 
+## Security
+
+See [`docs/threat-model.md`](docs/threat-model.md) for the full reasoning. In short:
+
+- **Opt-in at build time.** Only a `cargo scry` build has an endpoint. A plain `cargo build` of the
+  same sources contains no Scry code. Don't ship a `cargo scry` build: debug or release makes no
+  difference.
+- **Local only.** The endpoint listens on `127.0.0.1`, on a port the operating system picks. It
+  can't be reached from another machine without a port forward that someone sets up deliberately.
+- **A token on every request.** Each run generates a random 256-bit token, which every request must
+  carry. Its only copy is the app's descriptor in `~/.scry-rs/targets`, which only the user can
+  read: the file is `0600` on Linux and macOS, and the profile folder is private to the user on
+  Windows.
+- **The token holder is trusted like a debugger.** Whoever has it can read and change the app's
+  state, call its functions, change its calls and run scripts and page JavaScript in it, as the
+  app's user. That is the purpose of the tool, so use it on apps you build and run for development
+  and testing.
+
+## Platforms
+
+| | Windows | Linux | macOS |
+|---|---|---|---|
+| `cargo scry`, the registry, calls, scripts, hooks | Yes | Yes | Yes |
+| Dioxus state, routes, page commands (`click`, `type`, `text`, `js`) | Yes | Yes | Yes |
+| Screenshots | Yes (WebView2) | Not yet (WebKitGTK) | Not yet (WKWebView) |
+| `scry-rs` release builds | x64, Arm64 | x64, Arm64 | Intel, Apple silicon |
+
+Rust 1.91 or later. On Linux, Dioxus desktop apps need the WebKitGTK development packages that
+Dioxus itself requires.
+
 ## Known limits
 
 - Plain stack locals can't be reached. Only statics, and state reachable from them or from tracked hooks.
@@ -571,3 +806,18 @@ Type names are shown short (`Vec<Item>`); `ls` also gives the full one as `fullT
   that locks a `Mutex` its own path already holds.
 - Only types defined without generic parameters in opted-in crates have callable methods.
 - Script variables don't survive between `eval` calls.
+
+## Building and testing
+
+See [`docs/development.md`](docs/development.md). From `scry/`:
+
+```sh
+cargo fmt --all --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace
+```
+
+## License
+
+MIT. See [`LICENSE`](LICENSE). The crates the `scry-rs` binaries include are listed in
+[`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md).

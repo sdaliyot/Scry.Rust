@@ -52,10 +52,10 @@ thread, without changing what the function does. Then read those calls, or wait 
 matches a condition.
 
 ```text
-scry hook add console_demo::inventory::Inventory::sell_one
-scry hook wait 1 "result != () && args.index == 2" 60
-scry hook read 1
-scry hook remove 1
+scry-rs hook add console_demo::inventory::Inventory::sell_one
+scry-rs hook wait 1 "result != () && args.index == 2" 60
+scry-rs hook read 1
+scry-rs hook remove 1
 ```
 
 Like everything else in `cargo scry`, it needs no change to the app's sources.
@@ -116,7 +116,7 @@ pub fn sell_one(&mut self, index: usize) -> Option<Item> { static SITE: HookSite
   the future completes. The guard is `Send`, so a `Send` future stays `Send`.
 - **The site** is a `static` inside the function, so a generic function has one site covering every
   instantiation. Each site carries the function's path and signature, and is registered in a linkme
-  list like the call shims, so `scry hooks` can list it.
+  list like the call shims, so `scry-rs hooks` can list it.
 
 ### Which functions are hookable
 

@@ -3,7 +3,7 @@
 //! `assets/scry.res` is compiled ahead of time from `assets/scry.rc`, so building needs no
 //! resource compiler. The MSVC linker takes the `.res` file as it is. After changing the icon,
 //! rebuild the `.res` file from the `assets` folder with the Windows SDK's `rc /fo scry.res scry.rc`.
-//! `assets/scry.svg` is the source of `scry.ico`.
+//! The icon, `assets/scry.ico`, is drawn from the repository's `assets/scry-rs-logo.svg`.
 
 fn main() {
     println!("cargo:rerun-if-changed=assets/scry.res");
