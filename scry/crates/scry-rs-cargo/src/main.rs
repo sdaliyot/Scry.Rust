@@ -221,21 +221,51 @@ fn subcommand(args: Vec<OsString>) -> ExitCode {
     }
 }
 
-/// `cargo metadata` for the workspace the command builds, honouring its `--manifest-path`.
+/// `cargo metadata` for the workspace the command builds, honouring its `--manifest-path` and its
+/// feature selection: the dependency graph depends on it (dioxus-desktop is in an app's graph only
+/// when its `desktop` feature is on). If cargo rejects the features for metadata - a virtual
+/// workspace's root takes none - the graph with default features is used.
 fn metadata(cargo: &OsString, args: &[OsString]) -> Option<serde_json::Value> {
-    let mut cmd = Command::new(cargo);
-    cmd.args(["metadata", "--format-version", "1"]);
+    let (manifest, features) = metadata_args(args);
+    let run = |features: &[OsString]| {
+        let output = Command::new(cargo)
+            .args(["metadata", "--format-version", "1"])
+            .args(&manifest)
+            .args(features)
+            .stderr(std::process::Stdio::null())
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        serde_json::from_slice(&output.stdout).ok()
+    };
+    run(&features).or_else(|| if features.is_empty() { None } else { run(&[]) })
+}
+
+/// The arguments of a cargo command that `cargo metadata` takes too: its manifest, and its
+/// features.
+fn metadata_args(args: &[OsString]) -> (Vec<OsString>, Vec<OsString>) {
+    let (mut manifest, mut features) = (Vec::new(), Vec::new());
     let mut args = args.iter();
     while let Some(arg) = args.next() {
         let text = arg.to_string_lossy();
         if text == "--manifest-path" {
-            cmd.arg(arg).args(args.next());
+            manifest.push(arg.clone());
+            manifest.extend(args.next().cloned());
         } else if text.starts_with("--manifest-path=") {
-            cmd.arg(arg);
+            manifest.push(arg.clone());
+        } else if text == "--features" || text == "-F" {
+            features.push("--features".into());
+            features.extend(args.next().cloned());
+        } else if text.starts_with("--features=") || text == "--all-features" || text == "--no-default-features" {
+            features.push(arg.clone());
+        } else if let Some(list) = text.strip_prefix("-F").filter(|list| !list.is_empty()) {
+            features.push("--features".into());
+            features.push(list.into());
         }
     }
-    let output = cmd.stderr(std::process::Stdio::null()).output().ok()?;
-    serde_json::from_slice(&output.stdout).ok()
+    (manifest, features)
 }
 
 #[cfg(test)]
@@ -243,6 +273,18 @@ mod tests {
     use std::ffi::OsStr;
 
     use super::*;
+
+    #[test]
+    fn metadata_sees_the_features_the_command_builds_with() {
+        let args: Vec<OsString> =
+            "build --platform desktop --features app,desktop --no-default-features --manifest-path a/Cargo.toml -Fx"
+                .split_whitespace()
+                .map(OsString::from)
+                .collect();
+        let (manifest, features) = metadata_args(&args);
+        assert_eq!(manifest, ["--manifest-path", "a/Cargo.toml"]);
+        assert_eq!(features, ["--features", "app,desktop", "--no-default-features", "--features", "x"]);
+    }
 
     #[test]
     fn dx_mode_puts_a_rustc_copy_first_on_the_path() {
