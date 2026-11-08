@@ -33,8 +33,7 @@ unchanged and contains no Scry code at all.
 registry, scripts, calls, hooks, `wait` and `assert`. The Dioxus support adds routes, pages and
 screenshots on top.
 
-It runs on Windows, Linux and macOS, with Rust 1.91 or later. Screenshots work on Windows and Linux
-so far.
+It runs on Windows, Linux and macOS, with Rust 1.91 or later, screenshots included.
 
 ## How an app opts in
 
@@ -358,18 +357,22 @@ writes the image to a file and replies with its path (`file`) instead of the dat
 
 Nothing is read off the screen. The webview's engine renders the page for the capture: on
 Windows through the DevTools protocol's `Page.captureScreenshot` in WebView2, on Linux through
-WebKitGTK's snapshot of the document. Windows over the app and the window's place on the desktop
-don't change the result, and on Linux a virtual display such as Xvfb is enough.
+WebKitGTK's snapshot of the document, on macOS through WKWebView's snapshot (or, for an element
+larger than the window, its PDF of the document). Width and height are in device pixels, so a
+HiDPI or Retina screen's resolution is kept. Windows over the app and the window's place on the
+desktop don't change the result, and on Linux a virtual display such as Xvfb is enough.
 - **Minimized windows:** on Windows, a minimized window works too. Chromium stops drawing a
   minimized window's page, so Scry briefly hides and shows the webview again to get a fresh frame.
   The page sees `visibilitychange` events when that happens. On Linux, a Dioxus app pauses while
-  its window is minimized or hidden (see [Known limits](#known-limits)), so restore it first.
+  its window is minimized or hidden (see [Known limits](#known-limits)), so restore it first. On
+  macOS, a covered window works; a minimized one hasn't been tested.
 - **Elements past the window's edge:** an element is first scrolled into view within its scrolling
-  containers, as for `click`. One larger than the window is rendered in full beyond it.
+  containers, as for `click`. One larger than the window is rendered in full beyond it. On macOS
+  such an element is drawn from WebKit's PDF of the page at the window's scale: the same layout,
+  though not necessarily the exact pixels the screen shows.
 
 `cargo scry` turns this on (`scry-rs`'s `dioxus-desktop` feature) for an app that depends on
-`dioxus-desktop`. It works on Windows and Linux so far. macOS (WKWebView) has a snapshot API of
-its own that isn't wired up yet.
+`dioxus-desktop`. It works on Windows, Linux and macOS.
 
 ### Errors on the page
 
@@ -812,7 +815,7 @@ See [`docs/threat-model.md`](docs/threat-model.md) for the full reasoning. In sh
 |---|---|---|---|
 | `cargo scry`, the registry, calls, scripts, hooks | Yes | Yes | Yes |
 | Dioxus state, routes, page commands (`click`, `type`, `text`, `js`) | Yes | Yes | Yes |
-| Screenshots | Yes (WebView2) | Yes (WebKitGTK) | Not yet (WKWebView) |
+| Screenshots | Yes (WebView2) | Yes (WebKitGTK) | Yes (WKWebView) |
 | `scry-rs` release builds | x64, Arm64 | x64, Arm64 | Intel, Apple silicon |
 
 Rust 1.91 or later. On Linux, Dioxus desktop apps need the WebKitGTK development packages that

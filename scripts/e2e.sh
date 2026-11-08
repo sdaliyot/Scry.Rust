@@ -5,8 +5,9 @@
 #   xvfb-run -a scripts/e2e.sh
 #
 # It builds what it needs. Run it from the repository root, on Linux, macOS or Windows (Git Bash).
-# On a desktop, the dx-demo's window opens while it runs. Screenshots are checked where they are
-# supported (Windows and Linux).
+# On a desktop, the dx-demo's window opens while it runs. Screenshots are checked on every platform
+# (WebView2 on Windows, WebKitGTK on Linux, WKWebView on macOS); on macOS, run it in a session on
+# the Mac's own desktop, not over SSH, so the window can open.
 set -uo pipefail
 
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -95,15 +96,10 @@ check "click" '"tag":"button"' --process dx-demo click 'text=All'
 # The click runs the app's handler after it replies, so wait for its effect rather than read it.
 check "the click's effect" '"satisfied":true' --process dx-demo wait timeout=10 'FILTER == "All"'
 check "windows" '"window":0' --process dx-demo windows
-case "$(uname -s)" in
-  Darwin) check "screenshot (not on macOS yet)" '"bad_command"' --process dx-demo screenshot ;;
-  *)
-    check "screenshot of the page" '"format":"png"' --process dx-demo --out "$work/page.png" screenshot
-    is_png "the page's PNG" "$work/page.png"
-    check "screenshot of an element" '"tag":"ul"' --process dx-demo --out "$work/list.png" screenshot ul
-    is_png "the element's PNG" "$work/list.png"
-    ;;
-esac
+check "screenshot of the page" '"format":"png"' --process dx-demo --out "$work/page.png" screenshot
+is_png "the page's PNG" "$work/page.png"
+check "screenshot of an element" '"tag":"ul"' --process dx-demo --out "$work/list.png" screenshot ul
+is_png "the element's PNG" "$work/list.png"
 
 echo
 if ((failures)); then

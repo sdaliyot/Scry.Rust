@@ -375,8 +375,8 @@ scry-rs --out list.png screenshot ul           # one element, at its own size
 - Always use `--out`. Without it the reply holds the whole image as base64.
 - Look at the saved image to check layout and appearance. Use `text` and `get` to check content
   and state, which are exact.
-- Screenshots work on Windows and Linux, not on macOS yet. On Linux, a virtual display (Xvfb) is
-  enough.
+- Screenshots work on Windows, Linux and macOS, in device pixels (a Retina screen's full
+  resolution). On Linux, a virtual display (Xvfb) is enough.
 - On Linux, a Dioxus app pauses while its window is minimized or hidden, and every command then
   fails with `target_busy`. Ask the user to restore the window.
 
