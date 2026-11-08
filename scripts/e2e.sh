@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # End-to-end check: runs both demos as `cargo scry` builds and drives them with `scry-rs`, the way an
-# agent or a test does. CI runs it on Linux under Xvfb:
+# agent or a test does. CI runs it on every supported platform; on Linux, under Xvfb:
 #
 #   xvfb-run -a scripts/e2e.sh
 #

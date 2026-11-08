@@ -51,8 +51,8 @@ a desktop, run it under Xvfb: `xvfb-run -a scripts/e2e.sh`.
 
 CI ([`.github/workflows/ci.yml`](../.github/workflows/ci.yml)) runs the three commands above and
 builds both demos with `cargo scry` on every platform a release supports: Windows, Linux and
-macOS, each on x64 and Arm64. It runs `scripts/e2e.sh` on Linux x64 and Arm64 under Xvfb, and
-checks the workspace with Rust 1.91.
+macOS, each on x64 and Arm64. It runs `scripts/e2e.sh` on each of them too (on Linux under Xvfb),
+and checks the workspace with Rust 1.91.
 
 ## How `cargo scry` works
 

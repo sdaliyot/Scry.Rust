@@ -13,7 +13,7 @@ cargo test --workspace
 
 CI runs these on Windows, Linux and macOS, each on x64 and Arm64, and builds the demos with
 `cargo scry`. [`scripts/e2e.sh`](scripts/e2e.sh) runs the demos and drives them with `scry-rs`;
-CI runs it on Linux.
+CI runs it on every one of those platforms.
 
 ## Pull requests
 
