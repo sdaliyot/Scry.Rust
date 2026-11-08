@@ -21,7 +21,8 @@ failures=0
 pids=()
 
 cleanup() {
-  for pid in "${pids[@]}"; do kill "$pid" 2>/dev/null; done
+  # Written so that bash 3.2 (macOS) accepts an empty array under set -u.
+  for pid in ${pids[@]+"${pids[@]}"}; do kill "$pid" 2>/dev/null; done
   rm -rf "$work"
 }
 trap cleanup EXIT
