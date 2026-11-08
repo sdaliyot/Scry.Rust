@@ -1,5 +1,6 @@
-# Format, lint and test the scry workspace, and build the demos with `cargo scry`, on Windows, Linux
-# and macOS. Also checks that the workspace still builds with the oldest supported Rust.
+# Formats, lints and tests the scry workspace, and builds the demos with `cargo scry`, on every
+# platform a release supports. Runs the end-to-end check (scripts/e2e.sh) on Linux, and checks that
+# the workspace still builds with the oldest supported Rust.
 name: CI
 
 on:
@@ -15,22 +16,33 @@ env:
 
 jobs:
   test:
-    name: Test (${{ matrix.os }})
+    name: Test (${{ matrix.name }})
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, ubuntu-latest, macos-latest]
+        include:
+          - { name: Windows x64, os: windows-latest }
+          - { name: Windows Arm64, os: windows-11-arm }
+          - { name: Linux x64, os: ubuntu-latest }
+          - { name: Linux Arm64, os: ubuntu-24.04-arm }
+          - { name: macOS Intel, os: macos-15-intel }
+          - { name: macOS Apple silicon, os: macos-latest }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
 
-      - name: Rust toolchain
-        run: |
-          rustup update stable --no-self-update
-          rustup default stable
-          rustup component add clippy rustfmt
+      # Installs rustup where the image has none (the Arm64 Windows image).
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            scry
+            demos -> target/scry
 
       # Dioxus desktop (the dx-demo and scry-rs's dioxus-desktop feature) needs WebKitGTK on Linux.
       - name: Linux webview libraries
@@ -58,6 +70,37 @@ jobs:
           cargo build --manifest-path ../scry/Cargo.toml -p scry-rs-cargo
           ../scry/target/debug/cargo-scry scry build --workspace
 
+  e2e:
+    name: End to end (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: Linux x64, os: ubuntu-latest }
+          - { name: Linux Arm64, os: ubuntu-24.04-arm }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            scry
+            demos -> target/scry
+
+      # The webview libraries, and Xvfb for a display: no desktop is needed.
+      - name: Linux webview libraries and Xvfb
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libxdo-dev libayatana-appindicator3-dev librsvg2-dev xvfb xauth
+
+      - name: Run the demos and drive them with scry-rs
+        run: xvfb-run -a scripts/e2e.sh
+
   msrv:
     name: Oldest supported Rust
     runs-on: ubuntu-latest
@@ -67,9 +110,8 @@ jobs:
           persist-credentials: false
 
       # Keep in step with `rust-version` in scry/Cargo.toml.
-      - name: Rust 1.91
-        run: rustup toolchain install 1.91 --profile minimal --no-self-update
+      - uses: dtolnay/rust-toolchain@1.91
 
       - name: Check
         working-directory: scry
-        run: cargo +1.91 check --workspace --all-targets
+        run: cargo check --workspace --all-targets

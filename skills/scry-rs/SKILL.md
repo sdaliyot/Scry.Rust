@@ -355,7 +355,9 @@ scry-rs js "return document.title"         # JavaScript, run as an async functio
 ```
 
 The app's own event handlers run, as they do for a user. Check the result through the state
-(`get`) or the page (`text`), not only from the click's reply.
+(`get`) or the page (`text`), not only from the click's reply. The handler runs just after
+`click` replies, so check its effect with `wait` (`wait 'FILTER == "All"'`) rather than an
+immediate `get`.
 
 ### Screenshots
 

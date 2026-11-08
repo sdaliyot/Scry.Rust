@@ -333,7 +333,8 @@ scry-rs js "return document.title"           # any JavaScript, run as an async f
 ```
 
 `click` and `type` return the element they acted on (`{tag, id, text}`, or `checked` for a
-checkbox). A selector or text with leading quotes is read as a JSON string (`type "#a b" "  x"`).
+checkbox). The app's handler runs just after the reply, so check its effect with `wait` rather
+than an immediate `get`. A selector or text with leading quotes is read as a JSON string (`type "#a b" "  x"`).
 An error the page throws comes back as `script_error` with its message, and a page that doesn't
 answer within 8 seconds as `timeout`. Elements that are hidden, or parked beside the window as
 Dioxus's dev-build toast is, don't match and are left out of `text`. These commands are answered

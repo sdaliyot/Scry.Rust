@@ -44,9 +44,15 @@ cargo build --manifest-path ../scry/Cargo.toml -p scry-rs-cargo -p scry-rs-cli
 ../scry/target/debug/scry-rs list
 ```
 
-CI ([`.github/workflows/ci.yml`](../.github/workflows/ci.yml)) runs the three commands above on
-Windows, Linux and macOS, builds both demos with `cargo scry`, and checks the workspace with Rust
-1.91.
+[`scripts/e2e.sh`](../scripts/e2e.sh) does the same as a test: it builds both demos with
+`cargo scry`, runs them, and drives them with `scry-rs`, checking state, calls, hooks, `wait`, the
+page and screenshots. Run it from the repository root (on Windows, from Git Bash). On Linux without
+a desktop, run it under Xvfb: `xvfb-run -a scripts/e2e.sh`.
+
+CI ([`.github/workflows/ci.yml`](../.github/workflows/ci.yml)) runs the three commands above and
+builds both demos with `cargo scry` on every platform a release supports: Windows, Linux and
+macOS, each on x64 and Arm64. It runs `scripts/e2e.sh` on Linux x64 and Arm64 under Xvfb, and
+checks the workspace with Rust 1.91.
 
 ## How `cargo scry` works
 
@@ -132,8 +138,8 @@ the icon:
    cargo publish -p scry-rs-cargo
    ```
 3. Tag the commit `v<version>` and push the tag. [`release.yml`](../.github/workflows/release.yml)
-   builds `scry-rs` for Windows, Linux and macOS (x64 and Arm64 each) and publishes the archives,
-   with a `SHA256SUMS` file, as a GitHub release. The workflow checks that the tag matches the
+   builds `scry-rs` on Windows, Linux and macOS (x64 and Arm64 each), checks that each build runs,
+   and publishes the archives, with a `SHA256SUMS` file, as a GitHub release. The workflow checks that the tag matches the
    workspace version.
 
 The Skill downloads `scry-rs` from the latest release, so a release is what updates the Skill's
