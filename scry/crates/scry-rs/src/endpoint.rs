@@ -50,14 +50,18 @@ pub fn targets_dir() -> PathBuf {
     PathBuf::from(home.unwrap_or_else(|| ".".into())).join(".scry-rs").join("targets")
 }
 
-/// Starts listening and writes this process's descriptor. `dispatch` queues a job for the
-/// registry's thread and returns false once nothing is taking jobs any more.
+/// The port and token [`listen`] chose, for [`publish`].
+static LISTENING: std::sync::OnceLock<(u16, String)> = std::sync::OnceLock::new();
+
+/// Starts listening. `dispatch` queues a job for the registry's thread and returns false once
+/// nothing is taking jobs any more. Clients find the endpoint only after [`publish`].
 pub fn listen(dispatch: impl Fn(Job) -> bool + Send + Sync + 'static) -> io::Result<()> {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
     let port = listener.local_addr()?.port();
     let token = new_token()?;
-    write_descriptor(port, &token)?;
-    eprintln!("scry: listening on 127.0.0.1:{port} (pid {})", std::process::id());
+    if LISTENING.set((port, token.clone())).is_err() {
+        return Err(io::Error::other("the endpoint is already listening"));
+    }
     if cfg!(panic = "abort") {
         eprintln!("scry: this build aborts on panic, so a command that panics ends the process");
     }
@@ -72,6 +76,18 @@ pub fn listen(dispatch: impl Fn(Job) -> bool + Send + Sync + 'static) -> io::Res
         }
     })?;
     Ok(())
+}
+
+/// Writes this process's descriptor, once the registry's thread is taking jobs, so that a client
+/// that finds the app can use it at once. A Dioxus app takes jobs only after its window and
+/// webview are up, which can take many seconds after `main` starts. Only the first call writes.
+pub fn publish() {
+    static PUBLISHED: std::sync::Once = std::sync::Once::new();
+    let Some((port, token)) = LISTENING.get() else { return };
+    PUBLISHED.call_once(|| match write_descriptor(*port, token) {
+        Ok(()) => eprintln!("scry: listening on 127.0.0.1:{port} (pid {})", std::process::id()),
+        Err(error) => eprintln!("scry: could not write the descriptor: {error}"),
+    });
 }
 
 fn serve(stream: TcpStream, token: &str, dispatch: &dyn Fn(Job) -> bool) {
@@ -203,8 +219,9 @@ pub fn start() {
         return;
     }
     let sender = std::sync::Mutex::new(sender);
-    if let Err(error) = listen(move |job| sender.lock().map(|sender| sender.send(job).is_ok()).unwrap_or(false)) {
-        eprintln!("scry: could not start the endpoint: {error}");
+    match listen(move |job| sender.lock().map(|sender| sender.send(job).is_ok()).unwrap_or(false)) {
+        Ok(()) => publish(),
+        Err(error) => eprintln!("scry: could not start the endpoint: {error}"),
     }
 }
 

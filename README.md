@@ -471,8 +471,10 @@ scry-rs assert 'FILTER == "All"'                      # fails with assertion_fai
 
 `wait` runs inside the app, so it needs the app running. To wait for the app itself to start, put
 `--wait-for-target DURATION` before any command: `scry-rs` then waits up to that long (`500ms`,
-`30s`, `2m`; a bare number is seconds) for a matching app to write its descriptor, instead of
-failing with `no_target` at once. With `--pid` or `--process`, it waits for that app:
+`30s`, `2m`; a bare number is seconds) for a matching app to start, instead of failing with
+`no_target` at once. An app is listed only once it can answer: a Dioxus app once its window is up,
+which can take a while after the process starts. With `--pid` or `--process`, it waits for that
+app:
 
 ```sh
 scry-rs --process my-app --wait-for-target 2m wait timeout=30 'APP.ready'

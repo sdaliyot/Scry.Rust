@@ -78,6 +78,7 @@ impl Clip {
 /// Chromium waits for a fresh frame, which a minimized window never draws. An element is captured
 /// in full, rendered beyond the window's viewport if it reaches past it - only then, for the same
 /// reason: that lays the page out again at full size and waits for a frame.
+#[cfg_attr(not(windows), allow(dead_code))] // Only WebView2 takes these so far.
 pub(crate) fn parameters(clip: &Clip) -> Value {
     json!({
         "format": "png",

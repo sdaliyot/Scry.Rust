@@ -75,7 +75,8 @@ pub fn track(component: &'static str, name: &'static str, value: impl FnOnce() -
 static JOBS: std::sync::Mutex<Option<UnboundedReceiver<Job>>> = std::sync::Mutex::new(None);
 
 /// Starts the endpoint for a Dioxus app. Called at the top of `main`; the registry itself runs on
-/// the UI thread, in the task [`use_endpoint`] starts, because that is where signals live.
+/// the UI thread, in the task [`use_endpoint`] starts, because that is where signals live. The
+/// descriptor is written only once that task runs, so the app isn't listed before it can answer.
 pub fn start_endpoint() {
     crate::run_async::capture_runtime();
     let (sender, receiver) = futures_channel::mpsc::unbounded::<Job>();
@@ -104,6 +105,8 @@ pub fn use_endpoint() {
                     let _ = reply.send(answer.to_string());
                 }
             });
+            // Jobs are taken from here on, so clients may find the app now.
+            crate::endpoint::publish();
         }
     });
 }

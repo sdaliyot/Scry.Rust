@@ -175,8 +175,8 @@ A Dioxus app that loads files with `asset!()` must be built through `dx` (`cargo
 it starts without its styles. `cargo scry` writes to `target/scry`, so it doesn't rebuild the
 normal build's dependencies. Leave the app running in the background while you use `scry-rs`.
 
-An app writes its descriptor only once it has started, and until then every command fails with
-`no_target`. After starting it, put `--wait-for-target DURATION` before the first command, so
+An app is listed only once it can answer commands (a Dioxus app once its window is up), and until
+then every command fails with `no_target`. After starting it, put `--wait-for-target DURATION` before the first command, so
 `scry-rs` waits for the app instead (`--wait-for-target 5m`: a first build can take minutes):
 
 ```sh
