@@ -3623,6 +3623,15 @@ dependencies = [
 name = "scry-rs-cli"
 version = "0.1.0"
 dependencies = [
+ "scry-rs-client",
+ "serde_json",
+]
+
+[[package]]
+name = "scry-rs-client"
+version = "0.1.0"
+dependencies = [
+ "serde",
  "serde_json",
 ]
 

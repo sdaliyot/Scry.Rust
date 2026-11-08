@@ -1,0 +1,17 @@
+[package]
+name = "scry-rs-client"
+description = "Talk to running Scry.Rust apps from Rust code, such as tests: what the scry-rs command line does, without a process per command."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+
+[dependencies]
+serde_json.workspace = true
+serde = "1"

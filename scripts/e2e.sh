@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # End-to-end check: runs both demos as `cargo scry` builds and drives them with `scry-rs`, the way an
-# agent or a test does. CI runs it on every supported platform; on Linux, under Xvfb:
+# agent or a test does, then from Rust through scry-rs-client's tests. CI runs it on every supported
+# platform; on Linux, under Xvfb:
 #
 #   xvfb-run -a scripts/e2e.sh
 #
@@ -100,6 +101,20 @@ check "screenshot of the page" '"format":"png"' --process dx-demo --out "$work/p
 is_png "the page's PNG" "$work/page.png"
 check "screenshot of an element" '"tag":"ul"' --process dx-demo --out "$work/list.png" screenshot ul
 is_png "the element's PNG" "$work/list.png"
+
+echo "== scry-rs-client (the demos, driven from Rust tests)"
+# The tests start demos of their own, each with a descriptor folder of its own. A Windows build
+# needs a Windows path.
+demos_path=$demos
+if command -v cygpath >/dev/null 2>&1; then demos_path=$(cygpath -w "$demos"); fi
+if SCRY_RS_DEMOS="$demos_path" cargo test --quiet --manifest-path "$root/scry/Cargo.toml" -p scry-rs-client --test demos \
+  >"$work/client.log" 2>&1; then
+  echo "ok    scry-rs-client's demo tests"
+else
+  echo "FAIL  scry-rs-client's demo tests"
+  sed 's/^/      /' "$work/client.log" | tail -40
+  failures=$((failures + 1))
+fi
 
 echo
 if ((failures)); then

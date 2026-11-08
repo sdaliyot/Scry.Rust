@@ -5,7 +5,7 @@
 #   https://github.com/sdaliyot/Scry.Rust/releases/latest/download/scry-rs-<target>.<zip|tar.gz>
 # which is what skills/scry-rs/SKILL.md downloads.
 #
-# The crates (scry-rs-derive, scry-rs, scry-rs-cargo, in that order) are published to crates.io
+# The crates (scry-rs-derive, scry-rs, scry-rs-cargo, scry-rs-client, in that order) are published to crates.io
 # separately, with `cargo publish`.
 name: Release
 

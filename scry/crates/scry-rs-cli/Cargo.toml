@@ -18,4 +18,5 @@ name = "scry-rs"
 path = "src/main.rs"
 
 [dependencies]
+scry-rs-client = { version = "0.1.0", path = "../scry-rs-client" }
 serde_json.workspace = true

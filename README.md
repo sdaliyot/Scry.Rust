@@ -176,6 +176,25 @@ that the `dx` CLI builds uses `cargo scry dx` (see [Apps built with `dx`](#apps-
 
 A test drives a `cargo scry` build of the app the same way an agent does:
 
+- **From Rust, through [`scry-rs-client`](scry/crates/scry-rs-client).** Everything the command
+  line does, in-process, over one connection per app, with no process per command. Errors carry
+  the same codes, so a test can match on them:
+
+  ```rust
+  use std::time::Duration;
+
+  let mut app = scry_rs_client::find().process("my-app").connect_within(Duration::from_secs(120))?;
+  app.wait("APP.stats.ticks >= 1", Duration::from_secs(30))?; // state that main sets up
+  let ticks: u64 = app.get_as("APP.stats.ticks")?;
+  app.set("APP.rules[0].percent", 50)?;
+  app.click("text=All")?;
+  app.wait(r#"FILTER == "All""#, Duration::from_secs(10))?;
+  app.screenshot(Some("ul"))?.save("list.png")?;
+  ```
+
+  Add it as a dev-dependency: `scry-rs-client = "0.1"`. A test that starts the app can give it a
+  descriptor folder of its own with `SCRY_RS_TARGETS` and find it there with `find().in_dir(...)`.
+  [`tests/demos.rs`](scry/crates/scry-rs-client/tests/demos.rs) drives both demos this way.
 - **Through the command line.** Run `scry-rs` and parse its one line of JSON. Pick the app with
   `--pid` when a test starts several. Give the first command `--wait-for-target` (such as
   `--wait-for-target 2m`), so it waits for the app the test just started instead of failing
@@ -225,7 +244,8 @@ flowchart TB
 | [`scry-rs-cargo`](scry/crates/scry-rs-cargo) (`cargo scry`) | your build | Runs cargo with `--features scry` and itself as the rustc wrapper, and compiles a rewritten copy of each opted-in crate |
 | [`scry-rs`](scry/crates/scry-rs) | your app | The runtime: the `Reflect` trait, the registry, paths, scripts, calls, hooks, the Dioxus support and the endpoint |
 | [`scry-rs-derive`](scry/crates/scry-rs-derive) | your build | `#[derive(Reflect)]`, which the generated code puts on every type |
-| [`scry-rs-cli`](scry/crates/scry-rs-cli) (`scry-rs`) | your shell | The command line: finds running apps through their descriptors and sends them commands |
+| [`scry-rs-client`](scry/crates/scry-rs-client) | your tests | Finds running apps through their descriptors and sends them commands, from Rust |
+| [`scry-rs-cli`](scry/crates/scry-rs-cli) (`scry-rs`) | your shell | The command line, on top of `scry-rs-client` |
 
 The protocol is strictly request and response: the app never sends anything first. Even
 `hook wait` and `wait` are answered late rather than pushed.

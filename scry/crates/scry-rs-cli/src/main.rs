@@ -12,18 +12,17 @@
 //! exit code is 0 when the reply is `"ok": true`. With a single target running, `--pid` can be
 //! left out. `eval --file PATH` and `eval -` read a longer script from a file or stdin.
 //!
-//! Targets are found through the descriptors they write (see `scry::endpoint`); the token in a
-//! descriptor is sent with each request and never printed.
+//! Targets are found, and commands sent, through `scry-rs-client`, which tests can use directly;
+//! the token in a descriptor is sent with each request and never printed.
 
 use std::env;
 use std::fs;
-use std::io::{self, BufRead, BufReader, Read, Write};
-use std::net::{SocketAddr, TcpStream};
+use std::io::{self, Read};
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
+use scry_rs_client::{Find, Screenshot, Target};
 use serde_json::{Value, json};
 
 const USAGE: &str = "usage: scry-rs [--wait-for-target DURATION] list
@@ -45,71 +44,6 @@ commands: roots | ls <path> | get <path> [depth] | set <path> <json> | help
 
 --wait-for-target waits up to DURATION (500ms, 30s, 2m; a bare number is seconds) for a matching
 app to start, instead of failing with no_target at once.";
-
-/// Must match `scry::endpoint::targets_dir`.
-fn targets_dir() -> PathBuf {
-    if let Some(dir) = env::var_os("SCRY_RS_TARGETS") {
-        return PathBuf::from(dir);
-    }
-    let home = if cfg!(windows) { env::var_os("USERPROFILE") } else { env::var_os("HOME") };
-    PathBuf::from(home.unwrap_or_else(|| ".".into())).join(".scry-rs").join("targets")
-}
-
-struct Target {
-    descriptor: Value,
-    address: SocketAddr,
-}
-
-impl Target {
-    fn pid(&self) -> u64 {
-        self.descriptor["pid"].as_u64().unwrap_or(0)
-    }
-
-    fn process(&self) -> &str {
-        self.descriptor["process"].as_str().unwrap_or("")
-    }
-
-    /// What `list` shows: everything but the token.
-    fn summary(&self) -> Value {
-        let mut summary = self.descriptor.clone();
-        if let Some(object) = summary.as_object_mut() {
-            object.remove("token");
-        }
-        summary
-    }
-}
-
-/// Targets whose endpoint still answers. A descriptor whose port refuses connections belongs to
-/// a process that has exited, and is deleted.
-fn targets() -> Vec<Target> {
-    let Ok(entries) = fs::read_dir(targets_dir()) else { return Vec::new() };
-    let mut found = Vec::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().is_none_or(|extension| extension != "json") {
-            continue;
-        }
-        let Some(descriptor) =
-            fs::read_to_string(&path).ok().and_then(|text| serde_json::from_str::<Value>(&text).ok())
-        else {
-            continue;
-        };
-        let Some(address) = descriptor["address"].as_str().and_then(|address| address.parse::<SocketAddr>().ok())
-        else {
-            continue;
-        };
-        if !address.ip().is_loopback() {
-            continue;
-        }
-        if TcpStream::connect_timeout(&address, Duration::from_millis(300)).is_ok() {
-            found.push(Target { descriptor, address });
-        } else {
-            let _ = fs::remove_file(&path);
-        }
-    }
-    found.sort_by_key(Target::pid);
-    found
-}
 
 fn main() -> ExitCode {
     let mut args: Vec<String> = env::args().skip(1).collect();
@@ -156,13 +90,15 @@ fn main() -> ExitCode {
         eprintln!("{USAGE}");
         return ExitCode::FAILURE;
     }
-    let matches = |target: &Target| {
-        pid.is_none_or(|pid| target.pid() == pid)
-            && process.as_deref().is_none_or(|name| target.process().eq_ignore_ascii_case(name))
-    };
+    let mut find = Find::default();
+    if let Some(pid) = pid {
+        find = find.pid(pid);
+    }
+    if let Some(process) = process {
+        find = find.process(process);
+    }
     if args[0] == "list" {
-        let list: Vec<Value> =
-            wait_for(wait_for_target, |found| found.iter().any(matches)).iter().map(Target::summary).collect();
+        let list: Vec<Value> = find.all_within(wait_for_target).iter().map(Target::summary).collect();
         println!("{}", Value::Array(list));
         return ExitCode::SUCCESS;
     }
@@ -171,8 +107,7 @@ fn main() -> ExitCode {
         Ok(command) => command,
         Err(error) => return fail("usage", &error),
     };
-    let candidates: Vec<Target> =
-        wait_for(wait_for_target, |found| found.iter().any(matches)).into_iter().filter(matches).collect();
+    let candidates = find.all_within(wait_for_target);
     let target = match candidates.as_slice() {
         [target] => target,
         [] if wait_for_target.is_zero() => return fail("no_target", "no matching running target; see `scry-rs list`"),
@@ -192,7 +127,8 @@ fn main() -> ExitCode {
         }
     };
 
-    match send(target, &command) {
+    let reply = target.connect().and_then(|mut client| client.send(&command));
+    match reply {
         Ok(mut reply) => {
             if let Some(out) = &out
                 && let Err(error) = save_image(&mut reply, out)
@@ -202,20 +138,7 @@ fn main() -> ExitCode {
             println!("{reply}");
             if reply["ok"] == true { ExitCode::SUCCESS } else { ExitCode::FAILURE }
         }
-        Err(error) => fail("connection_failed", &error),
-    }
-}
-
-/// The running targets, once `ready` accepts them or `timeout` has passed, whichever comes first.
-/// A target appears when its app has started and written its descriptor.
-fn wait_for(timeout: Duration, ready: impl Fn(&[Target]) -> bool) -> Vec<Target> {
-    let deadline = Instant::now() + timeout;
-    loop {
-        let found = targets();
-        if ready(&found) || Instant::now() >= deadline {
-            return found;
-        }
-        thread::sleep(Duration::from_millis(250).min(deadline.saturating_duration_since(Instant::now())));
+        Err(error) => fail(error.code(), error.message()),
     }
 }
 
@@ -256,18 +179,6 @@ fn command(args: &[String]) -> Result<String, String> {
     Ok(format!("eval {script}"))
 }
 
-fn send(target: &Target, command: &str) -> Result<Value, String> {
-    let token = target.descriptor["token"].as_str().ok_or("the descriptor has no token")?;
-    let mut stream =
-        TcpStream::connect_timeout(&target.address, Duration::from_secs(2)).map_err(|error| error.to_string())?;
-    // `hook wait` may take up to five minutes by design.
-    stream.set_read_timeout(Some(Duration::from_secs(330))).map_err(|error| error.to_string())?;
-    writeln!(stream, "{}", json!({ "token": token, "command": command })).map_err(|error| error.to_string())?;
-    let mut line = String::new();
-    BufReader::new(stream).read_line(&mut line).map_err(|error| error.to_string())?;
-    serde_json::from_str(&line).map_err(|error| format!("unreadable reply: {error}"))
-}
-
 /// `--out`: writes the reply's image (`base64Data`, as `screenshot` answers) to `path`, and puts
 /// the file's path in the reply in its place.
 fn save_image(reply: &mut Value, path: &PathBuf) -> Result<(), String> {
@@ -275,9 +186,12 @@ fn save_image(reply: &mut Value, path: &PathBuf) -> Result<(), String> {
         return Ok(());
     }
     let result = &mut reply["result"];
-    let data = result["base64Data"].as_str().ok_or("--out saves an image, and the reply has none")?;
-    let bytes = decode_base64(data).ok_or("the image is not valid base64")?;
-    fs::write(path, &bytes).map_err(|error| format!("cannot write {}: {error}", path.display()))?;
+    if result.get("base64Data").is_none() {
+        return Err("--out saves an image, and the reply has none".into());
+    }
+    let image = Screenshot::from_result(result).map_err(|error| error.message().to_owned())?;
+    image.save(path).map_err(|error| error.message().to_owned())?;
+    let bytes = image.png;
     let saved = fs::canonicalize(path).unwrap_or_else(|_| path.clone());
     // Without Windows' verbatim prefix (`\\?\C:\...`), which canonicalize adds.
     let saved = saved.display().to_string();
@@ -288,28 +202,6 @@ fn save_image(reply: &mut Value, path: &PathBuf) -> Result<(), String> {
         result.insert("bytes".into(), Value::from(bytes.len()));
     }
     Ok(())
-}
-
-fn decode_base64(text: &str) -> Option<Vec<u8>> {
-    let mut bytes = Vec::with_capacity(text.len() / 4 * 3);
-    let (mut bits, mut count) = (0u32, 0);
-    for c in text.bytes().filter(|c| *c != b'=') {
-        let value = match c {
-            b'A'..=b'Z' => c - b'A',
-            b'a'..=b'z' => c - b'a' + 26,
-            b'0'..=b'9' => c - b'0' + 52,
-            b'+' => 62,
-            b'/' => 63,
-            _ => return None,
-        };
-        bits = (bits << 6) | u32::from(value);
-        count += 6;
-        if count >= 8 {
-            count -= 8;
-            bytes.push((bits >> count) as u8);
-        }
-    }
-    Some(bytes)
 }
 
 fn fail(code: &str, message: &str) -> ExitCode {

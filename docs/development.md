@@ -11,7 +11,8 @@ How the repository is laid out, how to build and test it, and how a release is m
 | `scry/crates/scry-rs` | The runtime library, imported as `scry`: `Reflect`, `Registry`, the endpoint, scripts, hooks, the Dioxus support |
 | `scry/crates/scry-rs-derive` | `#[derive(Reflect)]` |
 | `scry/crates/scry-rs-cargo` | `cargo scry`: builds an app with a generated registry |
-| `scry/crates/scry-rs-cli` | `scry-rs`: the command line that talks to running apps |
+| `scry/crates/scry-rs-client` | The client library: finds running apps and sends them commands, from Rust (tests) |
+| `scry/crates/scry-rs-cli` | `scry-rs`: the command line that talks to running apps, on top of the client |
 | `demos/` | A console app and a Dioxus desktop app, in a workspace of their own |
 | `skills/scry-rs/` | The agent Skill |
 | `docs/` | This document, the [threat model](threat-model.md), and [design notes](design/) |
@@ -136,6 +137,7 @@ the icon:
    cargo publish -p scry-rs-derive
    cargo publish -p scry-rs
    cargo publish -p scry-rs-cargo
+   cargo publish -p scry-rs-client
    ```
 3. Tag the commit `v<version>` and push the tag. [`release.yml`](../.github/workflows/release.yml)
    builds `scry-rs` on Windows, Linux and macOS (x64 and Arm64 each), checks that each build runs,

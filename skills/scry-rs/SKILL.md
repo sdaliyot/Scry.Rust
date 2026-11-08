@@ -300,6 +300,12 @@ scry-rs assert 'FILTER == "All"'                 # fails with assertion_failed w
 
 Prefer `wait` over sleeping and polling with `get`.
 
+When the user wants checks kept as the app's own Rust tests, write them with the
+[`scry-rs-client`](https://crates.io/crates/scry-rs-client) crate (a dev-dependency) rather than
+by running `scry-rs` from the test: `scry_rs_client::find().process("my-app").connect_within(...)`
+returns a client with `get`, `set`, `call`, `eval`, `wait`, `assert`, `click`, `text` and
+`screenshot`, whose errors carry the same codes.
+
 ## Observing calls (hooks)
 
 Every hookable function in a `cargo scry` build can record its calls:

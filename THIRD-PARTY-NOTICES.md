@@ -10,6 +10,7 @@ include the crates below. Each one offers MIT among its licenses, and is used he
 | Crate | Version | License | Copyright |
 |---|---|---|---|
 | [`serde_json`](https://github.com/serde-rs/json) | 1.0.154 | MIT or Apache-2.0 | The serde_json authors |
+| [`serde`](https://github.com/serde-rs/serde) | 1.0.229 | MIT or Apache-2.0 | The serde authors |
 | [`serde_core`](https://github.com/serde-rs/serde) | 1.0.229 | MIT or Apache-2.0 | The serde authors |
 | [`itoa`](https://github.com/dtolnay/itoa) | 1.0.18 | MIT or Apache-2.0 | The itoa authors |
 | [`zmij`](https://github.com/dtolnay/zmij) | 1.0.23 | MIT | The zmij authors |
@@ -45,5 +46,5 @@ DEALINGS IN THE SOFTWARE.
 
 ## The crates on crates.io
 
-`scry-rs`, `scry-rs-derive` and `scry-rs-cargo` are published as source. Cargo fetches their
+`scry-rs`, `scry-rs-derive`, `scry-rs-cargo` and `scry-rs-client` are published as source. Cargo fetches their
 dependencies separately, under each dependency's own license; `cargo tree` lists them.
