@@ -1,19 +1,20 @@
 //! `screenshot [selector]`: the page of a Dioxus desktop window as its webview renders it, as a
 //! PNG - the whole visible page, or one element (a CSS selector or `text=Label`, as for `click`).
 //!
-//! Nothing is read off the screen. The webview's engine renders the page for the capture
-//! (Chromium's `Page.captureScreenshot`, through WebView2's DevTools protocol), so other windows
-//! over it, its position on the desktop, and whether a display is attached do not matter. An
-//! element is captured in full even where it runs past the bottom of the window. A webview stops
-//! drawing while its window is minimized (or the app hides it), so for a capture it is shown
-//! again, and hidden again after if the app had hidden it.
+//! Nothing is read off the screen. The webview's engine renders the page for the capture, so other
+//! windows over it, its position on the desktop, and whether a display is attached do not matter.
+//! An element is captured in full even where it runs past the bottom of the window.
+//!
+//! - **Windows:** Chromium's `Page.captureScreenshot`, through WebView2's DevTools protocol. A
+//!   webview stops drawing while its window is minimized (or the app hides it), so for a capture
+//!   it is shown again, and hidden again after if the app had hidden it.
+//! - **Linux:** WebKitGTK's snapshot of the whole document, cut to the page's or the element's box.
 //!
 //! The reply is `{format: "png", width, height, base64Data}` (width and height in pixels), plus
 //! `element` - what was captured - for a selector. `scry-rs --out shot.png screenshot ...` writes the
 //! PNG to a file instead of printing it.
 //!
-//! WebView2 only, so Windows only for now; WKWebView (macOS) and WebKitGTK (Linux) each have a
-//! snapshot API of their own.
+//! Not on macOS yet, where WKWebView has a snapshot API of its own.
 
 use serde_json::{Map, Value, json};
 
@@ -41,7 +42,7 @@ pub(crate) fn parse(line: &str) -> Option<Result<Capture, Error>> {
 }
 
 /// A box on the page, in CSS pixels from the top left of the document.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone, Copy)]
 pub(crate) struct Clip {
     pub x: f64,
     pub y: f64,
@@ -114,6 +115,19 @@ fn png_size(base64: &str) -> Option<(u32, u32)> {
     Some((word(16)?, word(20)?))
 }
 
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))] // WebView2 answers in base64 itself.
+fn encode_base64(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut text = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let word = chunk.iter().enumerate().fold(0u32, |word, (at, byte)| word | u32::from(*byte) << (16 - 8 * at));
+        for at in 0..4 {
+            text.push(if at <= chunk.len() { DIGITS[(word >> (18 - 6 * at)) as usize & 63] as char } else { '=' });
+        }
+    }
+    text
+}
+
 fn decode_base64(text: &str) -> Option<Vec<u8>> {
     let mut bytes = Vec::with_capacity(text.len() / 4 * 3);
     let mut bits = 0u32;
@@ -182,11 +196,53 @@ pub(crate) fn start(clip: &Clip) -> Result<Pending, Error> {
     Ok(Pending { answer, view })
 }
 
-#[cfg(not(windows))]
+/// Asks the webview of the window whose runtime is current to render the document, and cuts
+/// `clip` out of it.
+#[cfg(target_os = "linux")]
+pub(crate) fn start(clip: &Clip) -> Result<Pending, Error> {
+    use dioxus_desktop::wry::WebViewExtUnix;
+    use webkit2gtk::{SnapshotOptions, SnapshotRegion, WebViewExt};
+
+    let desktop = dioxus_core::try_consume_context::<dioxus_desktop::DesktopContext>()
+        .ok_or_else(|| Error::BadCommand("screenshot needs a Dioxus desktop window".into()))?;
+    let (sender, answer) = futures_channel::oneshot::channel();
+    let clip = *clip;
+    desktop.webview.webview().snapshot(
+        SnapshotRegion::FullDocument,
+        SnapshotOptions::NONE,
+        None::<&webkit2gtk::gio::Cancellable>,
+        move |surface| {
+            let png = surface.map_err(|error| error.to_string()).and_then(|surface| cut(&surface, &clip));
+            let _ = sender.send(png.map(|png| json!({ "data": encode_base64(&png) }).to_string()));
+        },
+    );
+    Ok(Pending { answer })
+}
+
+/// `clip` (in CSS pixels) of a document's snapshot, as a PNG. The snapshot's device scale maps CSS
+/// pixels to its own, so the cut keeps a HiDPI screen's resolution.
+#[cfg(target_os = "linux")]
+fn cut(snapshot: &cairo::Surface, clip: &Clip) -> Result<Vec<u8>, String> {
+    let error = |error: cairo::Error| format!("cairo: {error}");
+    let (scale, _) = snapshot.device_scale();
+    let pixels = |css: f64| ((css * scale).round() as i32).max(1);
+    let image =
+        cairo::ImageSurface::create(cairo::Format::ARgb32, pixels(clip.width), pixels(clip.height)).map_err(error)?;
+    image.set_device_scale(scale, scale);
+    {
+        let context = cairo::Context::new(&image).map_err(error)?;
+        context.set_source_surface(snapshot, -clip.x, -clip.y).map_err(error)?;
+        context.paint().map_err(error)?;
+    }
+    let mut png = Vec::new();
+    image.write_to_png(&mut png).map_err(|error| format!("cannot encode the PNG: {error}"))?;
+    Ok(png)
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
 pub(crate) fn start(_: &Clip) -> Result<Pending, Error> {
     Err(Error::BadCommand(
-        "screenshot is only supported on Windows (WebView2) so far; macOS and Linux webviews are not covered yet"
-            .into(),
+        "screenshot is supported on Windows (WebView2) and Linux (WebKitGTK) so far, not on macOS yet".into(),
     ))
 }
 
@@ -311,6 +367,16 @@ mod tests {
         let inside = Clip::from_rect(&json!({ "x": 0, "y": 0, "width": 300, "height": 40, "inside": true })).unwrap();
         assert_eq!(super::parameters(&inside)["captureBeyondViewport"], false);
         assert!(Clip::from_rect(&json!({ "x": 0, "y": 0, "width": 0, "height": 40 })).is_err());
+    }
+
+    #[test]
+    fn base64_round_trips() {
+        for text in ["", "a", "ab", "abc", "abcd", "hello world"] {
+            let encoded = encode_base64(text.as_bytes());
+            assert_eq!(decode_base64(&encoded).as_deref(), Some(text.as_bytes()), "{encoded}");
+        }
+        assert_eq!(encode_base64(b"hello"), "aGVsbG8=");
+        assert_eq!(decode_base64(PIXEL).map(|png| encode_base64(&png)).as_deref(), Some(PIXEL));
     }
 
     #[test]

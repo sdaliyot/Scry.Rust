@@ -30,7 +30,7 @@ dioxus = ["dep:dioxus-signals", "dep:dioxus-core", "dep:dioxus-document", "dep:d
 # `ui.route` and `ui.routes`: the app's router. `cargo scry` turns this on for an app that depends on dioxus-router.
 dioxus-router = ["dioxus", "dep:dioxus-router"]
 # `screenshot`: the page as the webview renders it. `cargo scry` turns this on for an app that depends on dioxus-desktop.
-dioxus-desktop = ["dioxus", "dep:dioxus-desktop", "dep:webview2-com", "dep:windows-core"]
+dioxus-desktop = ["dioxus", "dep:dioxus-desktop", "dep:webview2-com", "dep:windows-core", "dep:webkit2gtk", "dep:cairo-rs"]
 
 [dependencies]
 scry-rs-derive = { version = "0.1.0", path = "../scry-rs-derive" }
@@ -60,6 +60,11 @@ futures-util = { version = "0.3", optional = true, default-features = false }
 [target.'cfg(windows)'.dependencies]
 webview2-com = { version = "0.38", optional = true }
 windows-core = { version = "0.61", optional = true }
+
+# `screenshot` on Linux: WebKitGTK's snapshot, as a cairo surface (the versions wry 0.53 uses).
+[target.'cfg(target_os = "linux")'.dependencies]
+webkit2gtk = { version = "2.0", optional = true }
+cairo-rs = { version = "0.18", optional = true, features = ["png"] }
 
 [dev-dependencies]
 serde_json.workspace = true

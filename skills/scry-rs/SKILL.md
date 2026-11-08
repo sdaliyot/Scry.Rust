@@ -20,7 +20,7 @@ Typical uses:
 - **Reproduce and diagnose.** Watch a function's calls with a hook, wait for a condition, or read
   the state of an app that is stuck, before restarting it.
 - **Drive a Dioxus app.** Navigate routes, click and type in its page, read its text and take
-  screenshots, even when its window is covered or minimized.
+  screenshots, even when its window is covered (or, on Windows, minimized).
 
 ## Locating the `scry-rs` command line
 
@@ -364,12 +364,15 @@ scry-rs --out page.png screenshot              # the window's visible page
 scry-rs --out list.png screenshot ul           # one element, at its own size
 ```
 
-- The webview renders the image itself. Windows on top, a minimized window and a missing display
-  don't change it, so you don't need to bring the window forward.
+- The webview renders the image itself. Windows on top don't change it, so you don't need to
+  bring the window forward. On Windows a minimized window works too.
 - Always use `--out`. Without it the reply holds the whole image as base64.
 - Look at the saved image to check layout and appearance. Use `text` and `get` to check content
   and state, which are exact.
-- Screenshots work on Windows only for now.
+- Screenshots work on Windows and Linux, not on macOS yet. On Linux, a virtual display (Xvfb) is
+  enough.
+- On Linux, a Dioxus app pauses while its window is minimized or hidden, and every command then
+  fails with `target_busy`. Ask the user to restore the window.
 
 ### Several windows
 
@@ -399,7 +402,7 @@ Report what you checked and what you saw. Undo state you changed, unless the use
 | `no_target` | No running app matches | Is it running, and built with `cargo scry`? `scry-rs list`. Just started: `--wait-for-target` |
 | `ambiguous_target` | Several apps match | Add `--pid` |
 | `connection_failed` | The app stopped answering | It may have exited; run `list` again |
-| `target_busy` | The registry's thread didn't answer in 10 s | The UI thread is busy or blocked; retry later |
+| `target_busy` | The registry's thread didn't answer in 10 s | The UI thread is busy or blocked; retry later. On Linux, a minimized Dioxus window causes it: ask the user to restore it |
 | `no_such_root`, `no_such_member`, `index_out_of_range` | The path doesn't exist | `roots` and `ls` show what's there |
 | `not_writable` | Nothing on the path can be written safely | Use a function the app provides, or tell the user |
 | `type_mismatch`, `cannot_convert` | The value doesn't fit the type | `ls` shows the type; match the shape `get` returns |

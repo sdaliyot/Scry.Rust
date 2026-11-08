@@ -33,7 +33,8 @@ unchanged and contains no Scry code at all.
 registry, scripts, calls, hooks, `wait` and `assert`. The Dioxus support adds routes, pages and
 screenshots on top.
 
-It runs on Windows, Linux and macOS, with Rust 1.91 or later. Screenshots are Windows-only for now.
+It runs on Windows, Linux and macOS, with Rust 1.91 or later. Screenshots work on Windows and Linux
+so far.
 
 ## How an app opts in
 
@@ -354,18 +355,20 @@ scry-rs --out notes.png window 1 screenshot          # another window
 The reply is `{format: "png", width, height, base64Data}`, plus `element` for a selector. `--out`
 writes the image to a file and replies with its path (`file`) instead of the data.
 
-Nothing is read off the screen. The webview's engine renders the page for the capture, through
-the DevTools protocol's `Page.captureScreenshot` in WebView2. Windows over the app, the window's
-place on the desktop, and whether a display is attached don't change the result.
-- **Minimized windows:** a minimized window works too. Chromium stops drawing a minimized
-  window's page, so Scry briefly hides and shows the webview again to get a fresh frame. The page
-  sees `visibilitychange` events when that happens.
+Nothing is read off the screen. The webview's engine renders the page for the capture: on
+Windows through the DevTools protocol's `Page.captureScreenshot` in WebView2, on Linux through
+WebKitGTK's snapshot of the document. Windows over the app and the window's place on the desktop
+don't change the result, and on Linux a virtual display such as Xvfb is enough.
+- **Minimized windows:** on Windows, a minimized window works too. Chromium stops drawing a
+  minimized window's page, so Scry briefly hides and shows the webview again to get a fresh frame.
+  The page sees `visibilitychange` events when that happens. On Linux, a Dioxus app pauses while
+  its window is minimized or hidden (see [Known limits](#known-limits)), so restore it first.
 - **Elements past the window's edge:** an element is first scrolled into view within its scrolling
   containers, as for `click`. One larger than the window is rendered in full beyond it.
 
 `cargo scry` turns this on (`scry-rs`'s `dioxus-desktop` feature) for an app that depends on
-`dioxus-desktop`. It is Windows only for now: macOS (WKWebView) and Linux (WebKitGTK) have
-snapshot APIs of their own that aren't wired up yet.
+`dioxus-desktop`. It works on Windows and Linux so far. macOS (WKWebView) has a snapshot API of
+its own that isn't wired up yet.
 
 ### Errors on the page
 
@@ -806,7 +809,7 @@ See [`docs/threat-model.md`](docs/threat-model.md) for the full reasoning. In sh
 |---|---|---|---|
 | `cargo scry`, the registry, calls, scripts, hooks | Yes | Yes | Yes |
 | Dioxus state, routes, page commands (`click`, `type`, `text`, `js`) | Yes | Yes | Yes |
-| Screenshots | Yes (WebView2) | Not yet (WebKitGTK) | Not yet (WKWebView) |
+| Screenshots | Yes (WebView2) | Yes (WebKitGTK) | Not yet (WKWebView) |
 | `scry-rs` release builds | x64, Arm64 | x64, Arm64 | Intel, Apple silicon |
 
 Rust 1.91 or later. On Linux, Dioxus desktop apps need the WebKitGTK development packages that
@@ -828,6 +831,10 @@ Dioxus itself requires.
   doesn't stop native code. A function that blocks or loops blocks that thread. So does a method
   that locks a `Mutex` its own path already holds.
 - Only types defined without generic parameters in opted-in crates have callable methods.
+- On Linux, a Dioxus desktop app pauses while its window is minimized or hidden, and Scry's
+  commands wait with it until they fail with `target_busy`. Dioxus waits for the webview to draw
+  each update before it runs anything else, and WebKitGTK doesn't draw a window that isn't shown.
+  Under Xvfb, with no window manager, windows are never minimized.
 - Script variables don't survive between `eval` calls.
 
 ## Building and testing
