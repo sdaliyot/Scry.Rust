@@ -478,7 +478,9 @@ scry-rs assert 'FILTER == "All"'                      # fails with assertion_fai
 `30s`, `2m`; a bare number is seconds) for a matching app to start, instead of failing with
 `no_target` at once. An app is listed only once it can answer: a Dioxus app once its window is up,
 which can take a while after the process starts. With `--pid` or `--process`, it waits for that
-app:
+app. A console app answers from the first line of its `main`, so state that `main` sets up (a `OnceLock`
+filled at startup, say) can still be `empty` at first. Follow `--wait-for-target` with a `wait`
+on that state rather than reading it straight away:
 
 ```sh
 scry-rs --process my-app --wait-for-target 2m wait timeout=30 'APP.ready'

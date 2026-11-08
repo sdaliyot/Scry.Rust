@@ -63,7 +63,9 @@ check "no app yet" '"no_target"' --process console-demo roots
 # Started a moment after the command, so the command has to wait for it.
 (sleep 2 && exec "$demos/console-demo$exe" >"$work/console.log" 2>&1) &
 pids+=($!)
-check "--wait-for-target" '"ok":true' --process console-demo --wait-for-target 60s get APP.stats
+# The endpoint starts on main's first line, so APP may still be empty when the app is first listed: wait for
+# the state rather than read it straight away.
+check "--wait-for-target" '"satisfied":true' --process console-demo --wait-for-target 60s wait timeout=30 'APP.stats.ticks >= 1'
 check "roots" 'console_demo::APP' --process console-demo roots
 check "set" '"ok":true' --process console-demo set 'APP.rules[0].percent' 50
 check "get" '"percent":50' --process console-demo get 'APP.rules[0]'

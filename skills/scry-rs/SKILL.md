@@ -187,6 +187,10 @@ Name the app with `--process` (its executable's name, without `.exe`) when other
 running, then use `--pid` with the `pid` that `scry-rs list` shows. If the wait times out, check
 the build's output for errors before waiting again.
 
+A console app answers from the first line of its `main`, so state `main` sets up can still be `empty`
+just after it starts. Wait for it rather than read it straight away:
+`scry-rs --process my-app --wait-for-target 2m wait timeout=30 'APP.ready'`.
+
 If the user already started the app, don't restart it unless they agree: restarting loses the
 state they may want examined.
 
@@ -403,6 +407,7 @@ Report what you checked and what you saw. Undo state you changed, unless the use
 |---|---|---|
 | `no_target` | No running app matches | Is it running, and built with `cargo scry`? `scry-rs list`. Just started: `--wait-for-target` |
 | `ambiguous_target` | Several apps match | Add `--pid` |
+| `empty` | An `Option` or `OnceLock` on the path holds nothing | Just started: the app may not have set it yet, so `wait` for it |
 | `connection_failed` | The app stopped answering | It may have exited; run `list` again |
 | `target_busy` | The registry's thread didn't answer in 10 s | The UI thread is busy or blocked; retry later. On Linux, a minimized Dioxus window causes it: ask the user to restore it |
 | `no_such_root`, `no_such_member`, `index_out_of_range` | The path doesn't exist | `roots` and `ls` show what's there |
