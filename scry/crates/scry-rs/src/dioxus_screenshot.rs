@@ -9,12 +9,17 @@
 //!   webview stops drawing while its window is minimized (or the app hides it), so for a capture
 //!   it is shown again, and hidden again after if the app had hidden it.
 //! - **Linux:** WebKitGTK's snapshot of the whole document, cut to the page's or the element's box.
+//! - **macOS:** WKWebView's `takeSnapshotWithConfiguration:` of the box, in the view's coordinates,
+//!   encoded to PNG through `NSBitmapImageRep`. That snapshot only renders what lies within the
+//!   view's bounds and leaves the rest blank, so a box that reaches past the window's viewport (an
+//!   element taller than the window: one merely below it is scrolled into view first) is taken with
+//!   `createPDFWithConfiguration:` instead, cut to the box in document coordinates, and drawn into a
+//!   bitmap at the window's scale. Both keep a Retina screen's resolution, and both work while the
+//!   window is covered.
 //!
-//! The reply is `{format: "png", width, height, base64Data}` (width and height in pixels), plus
-//! `element` - what was captured - for a selector. `scry-rs --out shot.png screenshot ...` writes the
-//! PNG to a file instead of printing it.
-//!
-//! Not on macOS yet, where WKWebView has a snapshot API of its own.
+//! The reply is `{format: "png", width, height, base64Data}` (width and height in device pixels),
+//! plus `element` - what was captured - for a selector. `scry-rs --out shot.png screenshot ...`
+//! writes the PNG to a file instead of printing it.
 
 use serde_json::{Map, Value, json};
 
@@ -48,6 +53,10 @@ pub(crate) struct Clip {
     pub y: f64,
     pub width: f64,
     pub height: f64,
+    /// Where its top left corner is in the window's viewport, in CSS pixels: `x` and `y` less the
+    /// page's scroll offset.
+    pub left: f64,
+    pub top: f64,
     /// Whether it reaches past the window's viewport (so the page has to be rendered beyond it).
     pub beyond: bool,
 }
@@ -63,6 +72,8 @@ impl Clip {
             y: number("y")?,
             width: number("width")?,
             height: number("height")?,
+            left: number("left")?,
+            top: number("top")?,
             beyond: rect["inside"] != true,
         };
         if clip.width < 1.0 || clip.height < 1.0 {
@@ -73,6 +84,20 @@ impl Clip {
         }
         Ok(clip)
     }
+}
+
+/// The box as WKWebView's snapshot takes it: in the view's coordinates, in points - where it is in
+/// the window's viewport, the CSS pixels scaled by the page zoom. AppKit renders points at the
+/// screen's backing scale.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))] // Only WKWebView takes these.
+pub(crate) fn view_rect(clip: &Clip, zoom: f64) -> [f64; 4] {
+    [clip.left * zoom, clip.top * zoom, clip.width * zoom, clip.height * zoom]
+}
+
+/// The box as WKWebView's PDF takes it: in the document's coordinates, in points.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn document_rect(clip: &Clip, zoom: f64) -> [f64; 4] {
+    [clip.x * zoom, clip.y * zoom, clip.width * zoom, clip.height * zoom]
 }
 
 /// The DevTools protocol's `Page.captureScreenshot` parameters. Always with a clip: without one,
@@ -115,7 +140,7 @@ fn png_size(base64: &str) -> Option<(u32, u32)> {
     Some((word(16)?, word(20)?))
 }
 
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))] // WebView2 answers in base64 itself.
+#[cfg_attr(windows, allow(dead_code))] // WebView2 answers in base64 itself.
 fn encode_base64(bytes: &[u8]) -> String {
     const DIGITS: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut text = String::with_capacity(bytes.len().div_ceil(3) * 4);
@@ -239,11 +264,126 @@ fn cut(snapshot: &cairo::Surface, clip: &Clip) -> Result<Vec<u8>, String> {
     Ok(png)
 }
 
-#[cfg(not(any(windows, target_os = "linux")))]
-pub(crate) fn start(_: &Clip) -> Result<Pending, Error> {
-    Err(Error::BadCommand(
-        "screenshot is supported on Windows (WebView2) and Linux (WebKitGTK) so far, not on macOS yet".into(),
-    ))
+/// Asks the WKWebView of the window whose runtime is current to render `clip`: a snapshot of the
+/// view, or, where the box reaches past the window's viewport (which a snapshot leaves blank), a
+/// PDF of the document cut to the box, drawn at the window's scale.
+#[cfg(target_os = "macos")]
+pub(crate) fn start(clip: &Clip) -> Result<Pending, Error> {
+    use block2::RcBlock;
+    use dioxus_desktop::wry::WebViewExtMacOS;
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::NSImage;
+    use objc2_foundation::{NSData, NSError, NSPoint, NSRect, NSSize};
+    use objc2_web_kit::{WKPDFConfiguration, WKSnapshotConfiguration};
+
+    let desktop = dioxus_core::try_consume_context::<dioxus_desktop::DesktopContext>()
+        .ok_or_else(|| Error::BadCommand("screenshot needs a Dioxus desktop window".into()))?;
+    // The registry runs on the UI thread, which on macOS is the main thread.
+    let main = MainThreadMarker::new().ok_or_else(|| Error::Script("screenshot ran off the main thread".into()))?;
+    let webview = desktop.webview.webview();
+    let zoom = unsafe { webview.pageZoom() };
+    let rect = |[x, y, width, height]: [f64; 4]| NSRect::new(NSPoint::new(x, y), NSSize::new(width, height));
+
+    // Each handler runs once, on the main thread, after `start` has returned: it hands its result
+    // over, as Linux's does.
+    let (sender, answer) = futures_channel::oneshot::channel();
+    let sender = std::cell::Cell::new(Some(sender));
+    let send = move |png: Result<Vec<u8>, String>| {
+        if let Some(sender) = sender.take() {
+            let _ = sender.send(png.map(|png| json!({ "data": encode_base64(&png) }).to_string()));
+        }
+    };
+    // SAFETY (both handlers): WebKit passes a valid object, or null and an error, for the call.
+    let failed = |error: *mut NSError| {
+        unsafe { error.as_ref() }
+            .map_or_else(|| "WebKit returned nothing".into(), |e| e.localizedDescription().to_string())
+    };
+    if clip.beyond {
+        let scale = desktop.window.scale_factor();
+        let [_, _, width, height] = document_rect(clip, zoom);
+        let configuration = unsafe { WKPDFConfiguration::new(main) };
+        unsafe { configuration.setRect(rect(document_rect(clip, zoom))) };
+        let handler = RcBlock::new(move |pdf: *mut NSData, error: *mut NSError| {
+            send(match unsafe { pdf.as_ref() } {
+                Some(pdf) => rasterize(pdf, width, height, scale),
+                None => Err(failed(error)),
+            })
+        });
+        unsafe { webview.createPDFWithConfiguration_completionHandler(Some(&configuration), &handler) };
+    } else {
+        let configuration = unsafe { WKSnapshotConfiguration::new(main) };
+        unsafe {
+            configuration.setRect(rect(view_rect(clip, zoom)));
+            configuration.setAfterScreenUpdates(true);
+        }
+        let handler = RcBlock::new(move |image: *mut NSImage, error: *mut NSError| {
+            send(match unsafe { image.as_ref() } {
+                Some(image) => encode_png(image),
+                None => Err(failed(error)),
+            })
+        });
+        unsafe { webview.takeSnapshotWithConfiguration_completionHandler(Some(&configuration), &handler) };
+    }
+    Ok(Pending { answer })
+}
+
+/// A one-page PDF of `width` x `height` points, drawn at `scale` pixels a point, as a PNG.
+#[cfg(target_os = "macos")]
+fn rasterize(pdf: &objc2_foundation::NSData, width: f64, height: f64, scale: f64) -> Result<Vec<u8>, String> {
+    use objc2::AnyThread;
+    use objc2_app_kit::{NSBitmapImageRep, NSDeviceRGBColorSpace, NSGraphicsContext, NSPDFImageRep};
+    use objc2_foundation::{NSPoint, NSRect, NSSize};
+
+    let page = NSPDFImageRep::imageRepWithData(pdf).ok_or("WebKit's PDF is unreadable")?;
+    let pixels = |points: f64| ((points * scale).round() as isize).max(1);
+    let bitmap = unsafe {
+        NSBitmapImageRep::initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bytesPerRow_bitsPerPixel(
+            NSBitmapImageRep::alloc(),
+            std::ptr::null_mut(),
+            pixels(width),
+            pixels(height),
+            8,
+            4,
+            true,
+            false,
+            NSDeviceRGBColorSpace,
+            0,
+            0,
+        )
+    }
+    .ok_or("cannot make a bitmap for the PDF")?;
+    // Points, so that drawing scales to the bitmap's pixels.
+    bitmap.setSize(NSSize::new(width, height));
+    let context = NSGraphicsContext::graphicsContextWithBitmapImageRep(&bitmap).ok_or("cannot draw into the bitmap")?;
+    NSGraphicsContext::saveGraphicsState_class();
+    NSGraphicsContext::setCurrentContext(Some(&context));
+    let drawn = page.drawInRect(NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(width, height)));
+    context.flushGraphics();
+    NSGraphicsContext::restoreGraphicsState_class();
+    if !drawn {
+        return Err("cannot draw WebKit's PDF".into());
+    }
+    encode_bitmap(&bitmap)
+}
+
+/// A snapshot as a PNG, at the pixel size of its bitmap: twice its size in points on a Retina screen.
+#[cfg(target_os = "macos")]
+fn encode_png(image: &objc2_app_kit::NSImage) -> Result<Vec<u8>, String> {
+    use objc2_app_kit::NSBitmapImageRep;
+
+    let tiff = image.TIFFRepresentation().ok_or("the snapshot has no bitmap")?;
+    let bitmap = NSBitmapImageRep::imageRepWithData(&tiff).ok_or("the snapshot's bitmap is unreadable")?;
+    encode_bitmap(&bitmap)
+}
+
+#[cfg(target_os = "macos")]
+fn encode_bitmap(bitmap: &objc2_app_kit::NSBitmapImageRep) -> Result<Vec<u8>, String> {
+    use objc2_app_kit::NSBitmapImageFileType;
+    use objc2_foundation::NSDictionary;
+
+    let png = unsafe { bitmap.representationUsingType_properties(NSBitmapImageFileType::PNG, &NSDictionary::new()) }
+        .ok_or("cannot encode the PNG")?;
+    Ok(png.to_vec())
 }
 
 impl Pending {
@@ -359,14 +499,34 @@ mod tests {
 
     #[test]
     fn elements_are_clipped_to_their_box() {
-        let clip =
-            Clip::from_rect(&json!({ "x": 10.5, "y": 2000, "width": 300, "height": 40, "inside": false })).unwrap();
+        let clip = Clip::from_rect(
+            &json!({ "x": 10.5, "y": 2000, "width": 300, "height": 40, "left": 10.5, "top": 500, "inside": false }),
+        )
+        .unwrap();
         let parameters = parameters(&clip);
         assert_eq!(parameters["clip"], json!({ "x": 10.5, "y": 2000.0, "width": 300.0, "height": 40.0, "scale": 1 }));
         assert_eq!(parameters["captureBeyondViewport"], true);
-        let inside = Clip::from_rect(&json!({ "x": 0, "y": 0, "width": 300, "height": 40, "inside": true })).unwrap();
+        let inside = Clip::from_rect(
+            &json!({ "x": 0, "y": 0, "width": 300, "height": 40, "left": 0, "top": 0, "inside": true }),
+        )
+        .unwrap();
         assert_eq!(super::parameters(&inside)["captureBeyondViewport"], false);
-        assert!(Clip::from_rect(&json!({ "x": 0, "y": 0, "width": 0, "height": 40 })).is_err());
+        assert!(Clip::from_rect(&json!({ "x": 0, "y": 0, "width": 0, "height": 40, "left": 0, "top": 0 })).is_err());
+        assert!(Clip::from_rect(&json!({ "x": 0, "y": 0, "width": 300, "height": 40 })).is_err());
+    }
+
+    #[test]
+    fn webkit_takes_the_box_where_it_is_in_the_viewport() {
+        // An element 1500 CSS pixels down a page scrolled by 1200: 300 down the viewport.
+        let clip = Clip::from_rect(
+            &json!({ "x": 8, "y": 1500, "width": 200, "height": 50.5, "left": 8, "top": 300, "inside": true }),
+        )
+        .unwrap();
+        assert_eq!(view_rect(&clip, 1.0), [8.0, 300.0, 200.0, 50.5]);
+        assert_eq!(view_rect(&clip, 1.5), [12.0, 450.0, 300.0, 75.75]);
+        // Its PDF is cut from the whole document.
+        assert_eq!(document_rect(&clip, 1.0), [8.0, 1500.0, 200.0, 50.5]);
+        assert_eq!(document_rect(&clip, 1.5), [12.0, 2250.0, 300.0, 75.75]);
     }
 
     #[test]

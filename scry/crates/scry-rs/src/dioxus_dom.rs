@@ -224,19 +224,20 @@ pub(crate) async fn within_timeout<F: std::future::Future>(future: F) -> Result<
 /// A script that returns the window's viewport as a box in page coordinates, like [`rect_script`].
 pub(crate) fn viewport_script() -> String {
     wrap(
-        "return { x: window.scrollX, y: window.scrollY, width: window.innerWidth, height: window.innerHeight,          inside: true };",
+        "return { x: window.scrollX, y: window.scrollY, width: window.innerWidth, height: window.innerHeight,          left: 0, top: 0, inside: true };",
     )
 }
 
 /// A script that finds the element `selector` names, scrolls it into view within its scrolling
 /// containers (as `click` does), and returns its box in page coordinates (CSS pixels), whether it
-/// lies inside the window's viewport, and what it is: `{x, y, width, height, inside, element}`.
+/// lies inside the window's viewport, where it is in that viewport, and what it is:
+/// `{x, y, width, height, left, top, inside, element}`.
 pub(crate) fn rect_script(selector: &str) -> String {
     wrap(&format!(
         "const el = __scry.get({}); el.scrollIntoView({{ block: \"nearest\" }}); \
          const r = el.getBoundingClientRect(); \
          return {{ x: r.left + window.scrollX, y: r.top + window.scrollY, width: r.width, height: r.height, \
-         inside: r.top >= 0 && r.left >= 0 && r.bottom <= window.innerHeight && r.right <= window.innerWidth, \
+         left: r.left, top: r.top, inside: r.top >= 0 && r.left >= 0 && r.bottom <= window.innerHeight && r.right <= window.innerWidth, \
          element: __scry.describe(el) }};",
         quote(selector)
     ))

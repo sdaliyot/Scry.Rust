@@ -30,7 +30,7 @@ dioxus = ["dep:dioxus-signals", "dep:dioxus-core", "dep:dioxus-document", "dep:d
 # `ui.route` and `ui.routes`: the app's router. `cargo scry` turns this on for an app that depends on dioxus-router.
 dioxus-router = ["dioxus", "dep:dioxus-router"]
 # `screenshot`: the page as the webview renders it. `cargo scry` turns this on for an app that depends on dioxus-desktop.
-dioxus-desktop = ["dioxus", "dep:dioxus-desktop", "dep:webview2-com", "dep:windows-core", "dep:webkit2gtk", "dep:cairo-rs"]
+dioxus-desktop = ["dioxus", "dep:dioxus-desktop", "dep:webview2-com", "dep:windows-core", "dep:webkit2gtk", "dep:cairo-rs", "dep:objc2", "dep:block2", "dep:objc2-foundation", "dep:objc2-app-kit", "dep:objc2-web-kit"]
 
 [dependencies]
 scry-rs-derive = { version = "0.1.0", path = "../scry-rs-derive" }
@@ -65,6 +65,15 @@ windows-core = { version = "0.61", optional = true }
 [target.'cfg(target_os = "linux")'.dependencies]
 webkit2gtk = { version = "2.0", optional = true }
 cairo-rs = { version = "0.18", optional = true, features = ["png"] }
+
+# `screenshot` on macOS: WKWebView's snapshot (or PDF, beyond the window), made a PNG through AppKit
+# (the versions wry 0.53 uses). block2 makes the completion handlers.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = { version = "0.6", optional = true }
+block2 = { version = "0.6", optional = true }
+objc2-foundation = { version = "0.3", optional = true, default-features = false, features = ["std", "objc2-core-foundation", "NSData", "NSDictionary", "NSError", "NSGeometry", "NSString"] }
+objc2-app-kit = { version = "0.3", optional = true, default-features = false, features = ["std", "NSBitmapImageRep", "NSGraphics", "NSGraphicsContext", "NSImage", "NSImageRep", "NSPDFImageRep"] }
+objc2-web-kit = { version = "0.3", optional = true, default-features = false, features = ["std", "objc2-core-foundation", "objc2-app-kit", "block2", "WKWebView", "WKSnapshotConfiguration", "WKPDFConfiguration"] }
 
 [dev-dependencies]
 serde_json.workspace = true

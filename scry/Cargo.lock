@@ -3579,6 +3579,7 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 name = "scry-rs"
 version = "0.1.0"
 dependencies = [
+ "block2",
  "cairo-rs",
  "dioxus-core",
  "dioxus-desktop",
@@ -3591,6 +3592,10 @@ dependencies = [
  "getrandom 0.3.4",
  "linkme",
  "lock_api",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-foundation",
+ "objc2-web-kit",
  "parking_lot",
  "rhai",
  "scry-rs",
