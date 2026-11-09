@@ -1630,6 +1630,32 @@ struct Api;
     }
 
     #[test]
+    fn hook_points_leave_an_impl_trait_result_to_inference() {
+        let text = "pub fn evens(limit: u32) -> impl Iterator<Item = u32> {
+    (0..limit).filter(|n| n % 2 == 0)
+}
+pub async fn handler(name: String) -> impl std::fmt::Display {
+    name
+}
+";
+        let config = Config::default();
+        let (out, report) = rewrite_with(text, false, "", Some(&config));
+        assert_eq!(out.matches("static __SCRY_HOOK :").count(), 2, "{report}");
+        let lines: Vec<&str> = out.lines().collect();
+        assert!(lines[0].contains("run_once(move || {"), "no closure return type: {}", lines[0]);
+        assert!(lines[0].contains("let mut __scry_result = match __scry_skip {"), "{}", lines[0]);
+        assert!(lines[0].contains("let __scry_skip = match"), "{}", lines[0]);
+        // A script can't give a whole result of a type no code names: refused, and recorded.
+        assert!(lines[0].contains("returns `impl Iterator<Item = u32>`, a type no code can name"), "{}", lines[0]);
+        assert!(
+            lines[3].contains("=> async move {") && lines[3].contains("let mut __scry_result = match"),
+            "{}",
+            lines[3]
+        );
+        assert!(!report.contains("impl Trait"), "{report}");
+    }
+
+    #[test]
     fn compiles_hook_points_into_hookable_functions() {
         let text = "pub fn ratio(a: u32, b: u32) -> f64 {
     a as f64 / b as f64

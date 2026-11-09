@@ -123,7 +123,8 @@ pub fn sell_one(&mut self, index: usize) -> Option<Item> { static SITE: HookSite
 The set is wider than for calls, because nothing has to be built from JSON:
 
 - module-level functions, and the methods of module-level `impl` blocks, inherent or trait
-- including generic functions, `async` functions, and `&mut` and `impl Trait` parameters
+- including generic functions, `async` functions, `&mut` and `impl Trait` parameters, and an
+  `impl Trait` return type (left to inference; a script can't replace such a result whole)
 
 **Not hookable in this version,** each listed in `scry-report.txt` with the reason:
 
@@ -133,7 +134,6 @@ The set is wider than for calls, because nothing has to be built from JSON:
 | `unsafe fn` | Unsafe operations inside a closure need their own `unsafe` block |
 | `#[track_caller]` | The closure would change what `Location::caller()` reports |
 | `-> !` functions | A closure can't be declared `-> !` on stable Rust |
-| `-> impl Trait` | A closure can't be declared with that return type; would need a different shape |
 | Trait default method bodies; functions nested in other functions | Out of scope for now |
 | Dioxus components, `main`, tests | The same rules as for calls |
 | Under an attribute macro that breaks it | Tried, and left out if it doesn't compile (see below) |

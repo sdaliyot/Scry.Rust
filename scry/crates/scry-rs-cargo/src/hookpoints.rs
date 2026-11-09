@@ -13,7 +13,15 @@
 //! The body runs in a `move` closure declared with the function's own return type, so `return` and
 //! `?` mean what they meant before, and called as `FnOnce`, so it can return references into its
 //! parameters as the function could; an `async fn` uses `async move { BODY }.await` instead, which
-//! records the call when its work completes. While no hook is on the function, the cost is one
+//! records the call when its work completes.
+//!
+//! A function returning `impl Trait` (an `impl Responder` handler, an `impl Iterator`) has a return
+//! type no code can name, so its closure or `async` block is left to take the type from the body.
+//! Its calls are recorded and its arguments changed as any function's, and a `hook after` script
+//! changes its result in place; but a script can't hand over a whole result, which would have to be
+//! built as a type that can't be named, so that is refused and recorded as a change error. Where a
+//! body needs the declared type to compile - a `?` whose error type only the return type settles -
+//! the hook point doesn't compile, and is left out (see `crate::pieces`). While no hook is on the function, the cost is one
 //! atomic load per call. See `scry::hooks` for what is captured when one is.
 //!
 //! A hook can also change the call. Before the body, a `hook before` script may write by-value and
@@ -26,7 +34,7 @@
 //!
 //! - `const fn` (no closures there), `unsafe fn` (its unsafe operations would land in a closure),
 //!   `#[track_caller]` (the closure would change what `Location::caller()` sees)
-//! - functions returning `!` or `impl Trait`, which a closure cannot be declared to return
+//! - functions returning `!`, which a closure cannot be declared to return
 //! - a body starting with an inner attribute (`#![allow(..)]`), which must stay first
 //! - `main`, tests, UI components and functions under unknown attribute macros, as for calls
 //! - functions the crate's `[package.metadata.scry.hooks]` excludes
@@ -67,9 +75,10 @@ pub fn hook_point(source: &Source, attrs: &[Attribute], sig: &Signature, label: 
     let returns = match &sig.output {
         ReturnType::Default => quote!(()),
         ReturnType::Type(_, ty) if matches!(**ty, Type::Never(_)) => return Err("it returns `!`".into()),
-        ReturnType::Type(_, ty) if mentions_impl_trait(ty) => return Err("it returns `impl Trait`".into()),
         ReturnType::Type(_, ty) => ty.to_token_stream(),
     };
+    // `impl Trait`: no code can name the type, so the result's is left to inference.
+    let opaque = matches!(&sig.output, ReturnType::Type(_, ty) if mentions_impl_trait(ty));
 
     // What a call captures, and what a `hook before` script may write: by-value and `&mut`
     // parameters (rebound as `mut` so they can be written), and a `&mut self` receiver. A `&T`
@@ -122,8 +131,30 @@ pub fn hook_point(source: &Source, attrs: &[Attribute], sig: &Signature, label: 
     }
 
     let returns_type: Type = syn::parse2(returns.clone()).map_err(|_| "its return type cannot be spelled")?;
-    let skip_build = crate::functions::build_from_json(quote!(probe_arg), &returns_type, quote!(__scry_value));
-    let replace_build = crate::functions::build_from_json(quote!(probe_arg), &returns_type, quote!(&__scry_value));
+    let (skip_build, replace_build) = if opaque {
+        // Refused: `skip` records why; `replace` falls back to writing the result in place.
+        let reason = format!(
+            "the function returns `{}`, a type no code can name, so a script can't give a whole result;              an after script can change the result's fields",
+            crate::functions::compact(&returns_type)
+        );
+        let refused = quote! {
+            ::core::result::Result::<_, ::scry::Error>::Err(::scry::Error::NotWritable {
+                reason: ::std::string::String::from(#reason),
+            })
+        };
+        (refused.clone(), refused)
+    } else {
+        (
+            crate::functions::build_from_json(quote!(probe_arg), &returns_type, quote!(__scry_value)),
+            crate::functions::build_from_json(quote!(probe_arg), &returns_type, quote!(&__scry_value)),
+        )
+    };
+    // Where the result's type is written: nowhere for `impl Trait`.
+    let (skip_type, result_type, closure_type) = if opaque {
+        (quote!(), String::new(), String::new())
+    } else {
+        (quote!(: ::core::option::Option<#returns>), format!(": {returns}"), format!("-> {returns} "))
+    };
 
     let signature = crate::functions::signature_text(source, sig);
     let path = format!("::{label}");
@@ -145,7 +176,7 @@ pub fn hook_point(source: &Source, attrs: &[Attribute], sig: &Signature, label: 
         });
         #(#allow #rebinds)*
         #allow
-        let __scry_skip: ::core::option::Option<#returns> = match &mut __scry_call {
+        let __scry_skip #skip_type = match &mut __scry_call {
             ::core::option::Option::Some(__scry_c) => match __scry_c.before() {
                 ::core::option::Option::Some(__scry_changes) => {
                     #probes
@@ -191,11 +222,13 @@ pub fn hook_point(source: &Source, attrs: &[Attribute], sig: &Signature, label: 
     let (open, close) = if sig.asyncness.is_some() {
         ("async move {".to_owned(), "}.await, };")
     } else {
-        (format!("::scry::__private::run_once(move || -> {returns} {{"), "}), };")
+        (format!("::scry::__private::run_once(move || {closure_type}{{"), "}), };")
     };
     let skipped = "::core::option::Option::Some(__scry_skipped) => __scry_skipped, ::core::option::Option::None =>";
     Ok(HookPoint {
-        prefix: format!(" {header} {allow} let mut __scry_result: {returns} = match __scry_skip {{ {skipped} {open} "),
+        prefix: format!(
+            " {header} {allow} let mut __scry_result{result_type} = match __scry_skip {{ {skipped} {open} "
+        ),
         suffix: format!(" {close} {exit} "),
     })
 }

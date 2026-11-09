@@ -705,9 +705,14 @@ enabled = true                                  # false builds the crate without
 exclude = ["crate::util::next_random", "crate::auth::*"]
 ```
 
+A function returning `impl Trait` (an `impl Responder` handler, an `impl Iterator`) gets a hook
+point like any other. Its result's type can't be written, so a script can't hand over a whole
+result for it: that is recorded as a change error, and an `after` script changes the result's
+fields instead.
+
 **No hook point**, each listed in `scry-report.txt` with the reason:
 - `const` and `unsafe` functions, `#[track_caller]`
-- functions returning `!` or `impl Trait`
+- functions returning `!`
 - a body starting with an inner attribute
 - `main`, tests and UI components
 - a function whose attribute macro doesn't keep a hook point compiling (see above)
