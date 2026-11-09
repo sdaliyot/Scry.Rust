@@ -191,6 +191,27 @@ mod scripts {
     }
 
     #[test]
+    fn a_root_named_the_wrong_way_says_how_to_name_it() {
+        let mut registry = Registry::new();
+        registry
+            .add("app::server::R", Arc::new(Mutex::new(1u8)))
+            .add("app::client::R", Arc::new(Mutex::new(2u8)))
+            .add("app::server::STATE", Arc::new(Mutex::new(3u8)));
+        // A short name two roots share is neither's.
+        let message = eval(&registry, "R + 1")["error"]["message"].as_str().unwrap().to_owned();
+        assert!(message.contains("2 roots are named `R`"), "{message}");
+        assert!(message.contains(r#"root("app::client::R")"#) && message.contains(r#"root("app::server::R")"#));
+        assert_eq!(eval(&registry, r#"root("app::client::R")"#)["result"], json!(2));
+        // A full path reads as a module path in Rhai.
+        let message = eval(&registry, "app::server::STATE + 1")["error"]["message"].as_str().unwrap().to_owned();
+        assert!(message.contains(r#"root("app::server::STATE")"#), "{message}");
+        assert_eq!(eval(&registry, "STATE")["result"], json!(3));
+        // Other errors are left as they are.
+        let message = eval(&registry, "NOPE")["error"]["message"].as_str().unwrap().to_owned();
+        assert!(!message.contains("root("), "{message}");
+    }
+
+    #[test]
     fn a_node_result_is_a_snapshot() {
         let (registry, _) = registry();
         assert_eq!(eval(&registry, "state.items[1]")["result"]["name"], json!("bolt"));

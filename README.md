@@ -450,7 +450,9 @@ the windows after it move up a number; check `windows` again after closing one.
 
 `scry-rs eval <script>` runs a [Rhai](https://rhai.rs) script in the app (`scry-rs eval --file x.rhai`, or
 `scry-rs eval -` for stdin). Roots are variables, members are reached as in Rust, and assignments write
-through the same rules as `set`:
+through the same rules as `set`. A root's variable is its short name (`APP` for `my_app::APP`); in a
+script, `::` names a module, so a full path doesn't work. A short name that several roots share
+names none of them: reach each with `root("my_app::server::R")`, as the error then suggests.
 
 ```rhai
 for rule in APP.rules { print(rule.type_name()); }

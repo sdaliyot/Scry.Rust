@@ -283,6 +283,10 @@ APP.stats.ticks += 1000;
 The script's last value is the `result`. A script is stopped after 5 seconds and can't load
 modules. Variables don't survive between `eval` calls.
 
+A root's variable is its short name (`APP`, not `my_app::APP`: in a script `::` names a module).
+When several roots share a short name, none gets it: use `root("my_app::server::R")`, as the error
+says.
+
 ## Waiting and asserting
 
 Use `wait` to hold until the app reaches a state, and `assert` to fail when it isn't in one:

@@ -93,7 +93,7 @@ pub(crate) fn evaluate(
     }
     let result = engine.eval_with_scope::<Dynamic>(&mut scope, source);
     output.append(&mut printed.borrow_mut());
-    let result = result.map_err(|error| failure(&error))?;
+    let result = result.map_err(|error| explain(failure(&error), &error, &registry))?;
 
     for (name, node, before) in roots {
         // The first variable of that name is the root's; a later `let` of the same name shadows it.
@@ -258,6 +258,54 @@ fn variables(registry: &Rc<Registry>) -> Vec<(String, Node)> {
             Some((variable, Node { registry: Rc::clone(registry), root: name.as_str().into(), segments: Vec::new() }))
         })
         .collect()
+}
+
+/// Adds how to reach a root when a script named it in a way that doesn't work: by a short name
+/// several roots share (so none of them has it), or by its full path, whose `::` Rhai reads as a
+/// module path.
+fn explain(error: Error, cause: &EvalAltResult, registry: &Registry) -> Error {
+    let Error::Script(message) = error else { return error };
+    let names: Vec<String> = registry.roots().into_iter().map(|root| root.name).collect();
+    let listed = |roots: &[&String]| {
+        let mut list: Vec<String> = roots.iter().take(5).map(|name| format!("root(\"{name}\")")).collect();
+        if roots.len() > 5 {
+            list.push(format!("and {} more", roots.len() - 5));
+        }
+        list.join(", ")
+    };
+    let hint = match cause.unwrap_inner() {
+        EvalAltResult::ErrorVariableNotFound(variable, _) => {
+            let sharing: Vec<&String> = names
+                .iter()
+                .filter(|name| name.contains("::") && name.rsplit("::").next() == Some(variable.as_str()))
+                .collect();
+            (sharing.len() > 1).then(|| {
+                format!(
+                    "{} roots are named `{variable}`, so it names none of them; use {}",
+                    sharing.len(),
+                    listed(&sharing)
+                )
+            })
+        }
+        EvalAltResult::ErrorModuleNotFound(module, _) => {
+            let prefix = format!("{module}::");
+            let under: Vec<&String> = names
+                .iter()
+                .filter(|name| name.strip_prefix(&prefix).is_some_and(|rest| !rest.contains("::")))
+                .collect();
+            (!under.is_empty()).then(|| {
+                format!(
+                    "In a script, `::` names a module, so reach a root by its short name or with {}",
+                    listed(&under)
+                )
+            })
+        }
+        _ => None,
+    };
+    match hint {
+        Some(hint) => Error::Script(format!("{message}. {hint}")),
+        None => Error::Script(message),
+    }
 }
 
 fn identifier(name: &str) -> bool {
