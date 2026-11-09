@@ -287,3 +287,35 @@ fn peeled_values_are_written_with_exclusive_access() {
     assert_eq!(state.fixed[1], Some(tag("#y")));
     assert_eq!(set(&mut state, "tags", json!(["#z"])).unwrap_err().code(), "not_writable");
 }
+
+/// Like `ServerFnError` or `anyhow::Error`: an error type with serde, or only `Debug`, or nothing.
+#[derive(Serialize, Debug)]
+enum ServeError {
+    Unavailable { code: u16 },
+}
+
+#[derive(Debug)]
+#[allow(dead_code)] // Read only through `Debug`.
+struct DebugOnlyError(&'static str);
+
+struct OpaqueError;
+
+#[test]
+fn a_result_with_a_foreign_error_shows_ok_and_err() {
+    let snapshot = |field: scry::__private::FieldRef<'_>| field.snapshot(4);
+    let ok: Result<Option<u8>, ServeError> = Ok(None);
+    assert_eq!(snapshot(scry::__private::probe_ref!(&ok)), json!({ "Ok": null }));
+    let err: Result<Option<u8>, ServeError> = Err(ServeError::Unavailable { code: 503 });
+    assert_eq!(snapshot(scry::__private::probe_ref!(&err)), json!({ "Err": { "Unavailable": { "code": 503 } } }));
+    let err: Result<u8, DebugOnlyError> = Err(DebugOnlyError("down"));
+    assert_eq!(snapshot(scry::__private::probe_ref!(&err)), json!({ "Err": "DebugOnlyError(\"down\")" }));
+    let err: Result<u8, OpaqueError> = Err(OpaqueError);
+    assert!(snapshot(scry::__private::probe_ref!(&err))["Err"].to_string().contains("OpaqueError"));
+
+    // Navigated as an enum: `.Ok` and `.Err`.
+    let mut registry = Registry::new();
+    let value: &'static Result<Vec<u8>, ServeError> = Box::leak(Box::new(Ok(vec![7, 8])));
+    registry.__add_const("RESULT", scry::__private::probe_ref!(value));
+    assert_eq!(execute(&registry, "get RESULT.Ok[1]")["result"], json!(8));
+    assert_eq!(execute(&registry, "get RESULT.Err")["error"]["code"], json!("no_such_member"));
+}

@@ -16,14 +16,18 @@
 //!    `Arc<RwLock<HashMap<String, Foreign>>>`: read under the lock as JSON, and written under it
 //!    by round-tripping through JSON. Rust picks impls without looking inside generic types, so a
 //!    `Mutex<T>` is only `Reflect` when `T` is; this tier is what reaches a foreign `T` in one.
-//! 4. Iterable by reference, with `Reflect` items or `(key, Reflect)` pairs (third-party
+//! 4. A `Result` whose `Ok` type is `Reflect` but whose error type isn't (`ServerFnError`,
+//!    `anyhow::Error`, `std::io::Error`): `{"Ok": value}`, or `{"Err": error}` with the error read
+//!    through serde, else `Debug`, else its type name. (Without this, the next tier would take it:
+//!    a `Result` is iterable, over its `Ok` value, and an `Err` would read as an empty list.)
+//! 5. Iterable by reference, with `Reflect` items or `(key, Reflect)` pairs (third-party
 //!    collections): a sequence or map whose items stay navigable, writable through their own
 //!    locks, and callable.
-//! 5. `serde::Serialize` (`chrono`, `uuid`, `url`, `rust_decimal`, ...): a structured JSON view.
-//! 6. Peeled: a container named in the source - `Mutex<Vec<Tag>>` - taken apart layer by layer,
+//! 6. `serde::Serialize` (`chrono`, `uuid`, `url`, `rust_decimal`, ...): a structured JSON view.
+//! 7. Peeled: a container named in the source - `Mutex<Vec<Tag>>` - taken apart layer by layer,
 //!    with the type inside probed where it is concrete; see [`crate::peel`].
-//! 7. `Debug`: its text.
-//! 8. Anything else: its type name.
+//! 8. `Debug`: its text.
+//! 9. Anything else: its type name.
 //!
 //! Writing one: `Reflect`; `DerefMut` to a `Reflect` target; `Serialize + Deserialize`, by
 //! round-tripping the value through JSON (so `set at.date 2026-01-01` and `set at.offset.hours 2`
@@ -65,7 +69,7 @@ macro_rules! probe_ref {
     ($value:expr, $peel:expr) => {{
         #[allow(unused_imports)]
         use $crate::probes::read::*;
-        (&&&&&&&&$crate::probes::Probe($value, $peel)).scry_ref()
+        (&&&&&&&&&&&$crate::probes::Probe($value, $peel)).scry_ref()
     }};
 }
 
@@ -119,7 +123,7 @@ pub mod read {
         fn scry_ref(&self) -> FieldRef<'a>;
     }
 
-    impl<'a, T: Reflect, P> ViaReflect<'a> for &&&&&&&Probe<'a, T, P> {
+    impl<'a, T: Reflect, P> ViaReflect<'a> for &&&&&&&&&&Probe<'a, T, P> {
         fn scry_ref(&self) -> FieldRef<'a> {
             FieldRef::Reflect(self.0)
         }
@@ -129,7 +133,7 @@ pub mod read {
         fn scry_ref(&self) -> FieldRef<'a>;
     }
 
-    impl<'a, T: Deref, P> ViaDeref<'a> for &&&&&&Probe<'a, T, P>
+    impl<'a, T: Deref, P> ViaDeref<'a> for &&&&&&&&&Probe<'a, T, P>
     where
         T::Target: Reflect + Sized,
     {
@@ -142,12 +146,42 @@ pub mod read {
         fn scry_ref(&self) -> FieldRef<'a>;
     }
 
-    impl<'a, W: Wrapper, P> ViaWrappedSerde<'a> for &&&&&Probe<'a, W, P>
+    impl<'a, W: Wrapper, P> ViaWrappedSerde<'a> for &&&&&&&&Probe<'a, W, P>
     where
         W::Inner: Serialize + DeserializeOwned,
     {
         fn scry_ref(&self) -> FieldRef<'a> {
             FieldRef::Owned(Box::new(WrappedSerde { wrapper: self.0 }))
+        }
+    }
+
+    pub trait ViaResultSerde<'a> {
+        fn scry_ref(&self) -> FieldRef<'a>;
+    }
+
+    impl<'a, T: Reflect, E: Serialize, P> ViaResultSerde<'a> for &&&&&&&Probe<'a, Result<T, E>, P> {
+        fn scry_ref(&self) -> FieldRef<'a> {
+            ResultView::of(self.0, |error| FieldRef::Owned(Box::new(SerdeView::of(error))))
+        }
+    }
+
+    pub trait ViaResultDebug<'a> {
+        fn scry_ref(&self) -> FieldRef<'a>;
+    }
+
+    impl<'a, T: Reflect, E: Debug, P> ViaResultDebug<'a> for &&&&&&Probe<'a, Result<T, E>, P> {
+        fn scry_ref(&self) -> FieldRef<'a> {
+            ResultView::of(self.0, |error| FieldRef::Debug(DebugValue::new(error, type_name::<E>())))
+        }
+    }
+
+    pub trait ViaResultOpaque<'a> {
+        fn scry_ref(&self) -> FieldRef<'a>;
+    }
+
+    impl<'a, T: Reflect, E, P> ViaResultOpaque<'a> for &&&&&Probe<'a, Result<T, E>, P> {
+        fn scry_ref(&self) -> FieldRef<'a> {
+            ResultView::of(self.0, |_| FieldRef::Opaque(OpaqueValue::new(type_name::<E>())))
         }
     }
 
@@ -202,6 +236,65 @@ pub mod read {
     impl<'a, T, P> ViaOpaque<'a> for Probe<'a, T, P> {
         fn scry_ref(&self) -> FieldRef<'a> {
             FieldRef::Opaque(OpaqueValue::new(type_name::<T>()))
+        }
+    }
+}
+
+/// A `Result` whose error type isn't `Reflect`, shown as the `Reflect` impl for `Result` shows one:
+/// `{"Ok": value}` or `{"Err": error}`, navigated through `.Ok` and `.Err`.
+struct ResultView<'a> {
+    type_name: &'static str,
+    variant: &'static str,
+    value: FieldRef<'a>,
+}
+
+impl<'a> ResultView<'a> {
+    fn of<T: Reflect, E>(result: &'a Result<T, E>, error: impl FnOnce(&'a E) -> FieldRef<'a>) -> FieldRef<'a> {
+        let (variant, value) = match result {
+            Ok(value) => ("Ok", FieldRef::Reflect(value)),
+            Err(failure) => ("Err", error(failure)),
+        };
+        FieldRef::Owned(Box::new(ResultView { type_name: type_name::<Result<T, E>>(), variant, value }))
+    }
+}
+
+impl Reflect for ResultView<'_> {
+    fn type_name(&self) -> &'static str {
+        self.type_name
+    }
+
+    fn kind(&self) -> Kind {
+        Kind::Enum
+    }
+
+    fn members(&self) -> Vec<Member> {
+        vec![Member::new(self.variant, self.value.get().type_name())]
+    }
+
+    fn snapshot(&self, depth: usize) -> Value {
+        if depth == 0 {
+            return truncated(self.type_name);
+        }
+        Value::Object(serde_json::Map::from_iter([(self.variant.to_owned(), self.value.snapshot(depth - 1))]))
+    }
+
+    fn read(&self, path: &[Segment], visit: Visit<'_>) -> Result<(), Error> {
+        match path.split_first() {
+            None => visit(self),
+            Some((segment, rest)) if *segment.name() == *self.variant => self.value.get().read(rest, visit),
+            Some((segment, _)) => Err(crate::__private::no_member(self.type_name, segment)),
+        }
+    }
+
+    fn write(&mut self, path: &[Segment], visit: VisitMut<'_>) -> Result<(), Error> {
+        self.write_shared(path, visit)
+    }
+
+    /// Through the value's own locks, as a collection's items are written.
+    fn write_shared(&self, path: &[Segment], visit: VisitMut<'_>) -> Result<(), Error> {
+        match path.split_first() {
+            Some((segment, rest)) if *segment.name() == *self.variant => self.value.get().write_shared(rest, visit),
+            _ => Err(Error::needs_interior_mutability(self.type_name)),
         }
     }
 }
