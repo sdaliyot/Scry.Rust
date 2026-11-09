@@ -77,6 +77,14 @@ check "wait" '"satisfied":true' --process console-demo wait timeout=15 'APP.stat
 check "assert fails" '"assertion_failed"' --process console-demo assert 'APP.stats.ticks < 0'
 check "hook add" '"hook":1' --process console-demo hook add Inventory::sell_one
 check "hook wait" '"satisfied":true' --process console-demo hook wait 1 timeout=30
+# Functions under attribute macros cargo scry has never seen (demo-macros): each keeps what compiled.
+check "call under a macro" '"result":true' --process console-demo call routes::is_even 4
+check "no call shim where a macro made a type" '"no_such_function"' --process console-demo call routes::price_tag 125
+check "no hook point where a macro refused it" '"no_such_function"' --process console-demo hook add routes::is_even
+check "hook under a macro" '"hook":2' --process console-demo hook add routes::price_tag
+check "hook under a macro sees calls" '"satisfied":true' --process console-demo hook wait 2 timeout=15
+check "hook on a body compiled twice" '"hook":3' --process console-demo hook add routes::restock_note
+check "it sees the second copy" '"satisfied":true' --process console-demo hook wait 3 timeout=15 'args.item == "bolt"'
 case "$(uname -s)" in
   Linux) mode=$(stat -c %a "$SCRY_RS_TARGETS"/*.json) ;;
   Darwin) mode=$(stat -f %Lp "$SCRY_RS_TARGETS"/*.json) ;;

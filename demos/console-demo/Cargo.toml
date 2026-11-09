@@ -15,6 +15,8 @@ exclude = ["crate::util::next_random"]
 
 [dependencies]
 scry = { package = "scry-rs", path = "../../scry/crates/scry-rs", optional = true }
+# Attribute macros that rewrite the functions they sit on, as web frameworks' do.
+demo-macros = { path = "../demo-macros" }
 # Third-party types, as most apps hold them: a parking_lot lock around ids and timestamps with
 # serde support. Scry has no code for any of these crates.
 parking_lot = "0.12"

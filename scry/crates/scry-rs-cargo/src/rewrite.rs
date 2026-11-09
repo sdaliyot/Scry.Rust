@@ -20,6 +20,7 @@ use crate::generate::{
     Context, Generator, LaunchCollector, ModCollector, ModDecl, Report, TraitCollector, resolve_dyn_traits,
 };
 use crate::generics::{Index, scan};
+use crate::pieces::{Dropped, Located};
 use crate::tokens::{self, Include};
 
 pub struct Output {
@@ -27,10 +28,10 @@ pub struct Output {
     pub root: PathBuf,
     /// The drives of files outside the package, which need their own path remapping.
     pub external_drives: Vec<String>,
-    /// How many hook points were compiled in.
-    pub hook_points: usize,
     /// The generic instantiations were the last build's, reused without a MIR pass.
     pub generics_reused: bool,
+    /// Where each call shim and hook point is in the rewritten files, to blame errors on.
+    pub pieces: Vec<Located>,
 }
 
 pub struct Paths<'a> {
@@ -91,6 +92,8 @@ pub struct Options {
     /// What identifies the compilation besides its sources (rustc, its arguments, the generator),
     /// for the key of the saved generic instantiations.
     pub generics_seed: String,
+    /// Call shims and hook points to leave out, because they did not compile.
+    pub dropped: Dropped,
 }
 
 /// Rewrites the crate at `root`. `mir` compiles the original sources to a MIR dump, run only when
@@ -166,12 +169,12 @@ pub fn rewrite_crate(
         generics: options.config.generics,
         crate_name: &options.crate_name,
         hook_points: (options.hook_points && options.config.hooks).then_some(&options.config),
-        transparent: &options.config.transparent,
+        dropped: &options.dropped,
     };
 
     let _ = fs::remove_dir_all(paths.mirror_root);
     let mut external_drives = HashSet::new();
-    let mut hook_points = 0;
+    let mut pieces = Vec::new();
     if !options.config.hooks {
         report.lines.push("hook points: off, by [package.metadata.scry.hooks]".into());
     } else if !options.hook_points {
@@ -186,7 +189,6 @@ pub fn rewrite_crate(
         if points > 0 {
             report.lines.push(format!("  + hook points: {points}"));
         }
-        hook_points += points;
 
         for (decl, child) in &file.mods {
             let Some(child) = child else { continue };
@@ -220,7 +222,15 @@ pub fn rewrite_crate(
         if let Some(parent) = mirror.parent() {
             fs::create_dir_all(parent).map_err(|error| format!("{}: {error}", parent.display()))?;
         }
-        fs::write(&mirror, edits.apply(&file.source.text)).map_err(|error| format!("{}: {error}", mirror.display()))?;
+        let (text, located) = edits.apply_located(&file.source.text);
+        pieces.extend(located.into_iter().map(|(range, piece, marked)| Located {
+            original: file.original.clone(),
+            mirror: mirror.clone(),
+            range,
+            piece,
+            marked,
+        }));
+        fs::write(&mirror, text).map_err(|error| format!("{}: {error}", mirror.display()))?;
     }
 
     let report = format!(
@@ -233,8 +243,8 @@ pub fn rewrite_crate(
     Ok(Output {
         root: paths.mirror_of(root),
         external_drives: external_drives.into_iter().collect(),
-        hook_points,
         generics_reused,
+        pieces,
     })
 }
 
@@ -493,6 +503,7 @@ mod tests {
                 hook_points: true,
                 fresh_generics,
                 generics_seed: "rustc --edition 2024".into(),
+                dropped: crate::pieces::Dropped::default(),
             };
             let mir = || {
                 self.mir_runs.set(self.mir_runs.get() + 1);

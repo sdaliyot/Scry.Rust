@@ -76,10 +76,9 @@ const TRANSPARENT_MACROS: &[&str] = &[
     "trace",          // tracing-attributes' and others' function tracing
 ];
 
-/// The first attribute that is not known to leave the item as written. `transparent` adds macros
-/// the crate's manifest vouches for (see `crate::config`), matched the same way as
-/// [`TRANSPARENT_MACROS`].
-pub fn unknown_attribute(attrs: &[Attribute], transparent: &[String]) -> Option<String> {
+/// The first attribute that is not known to leave the item as written. Such an item still gets
+/// its call shim and hook point; each is left out only if it doesn't compile (see `crate::pieces`).
+pub fn unknown_attribute(attrs: &[Attribute]) -> Option<String> {
     attrs
         .iter()
         .map(|attr| attr.path())
@@ -90,7 +89,6 @@ pub fn unknown_attribute(attrs: &[Attribute], transparent: &[String]) -> Option<
             let known = |name: &str| name == full || name == last;
             !segments.first().is_some_and(|first| INERT_ATTRIBUTES.contains(&first.as_str()))
                 && !TRANSPARENT_MACROS.iter().any(|name| known(name))
-                && !transparent.iter().any(|name| known(name))
         })
         .map(|segments| segments.join("::"))
 }
@@ -126,13 +124,7 @@ impl<'a> Callee<'a> {
 }
 
 /// The `static` to insert after the function, or why there is none.
-pub fn shim(
-    source: &Source,
-    attrs: &[Attribute],
-    sig: &Signature,
-    callee: &Callee<'_>,
-    transparent: &[String],
-) -> Result<String, String> {
+pub fn shim(source: &Source, attrs: &[Attribute], sig: &Signature, callee: &Callee<'_>) -> Result<String, String> {
     let name = sig.ident.to_string();
     if callee.self_ty.is_none() && name == "main" {
         return Err("it is the program's entry point".into());
@@ -144,9 +136,6 @@ pub fn shim(
     }
     if attrs.iter().any(|attr| attr.path().is_ident("test") || attr.path().is_ident("bench")) {
         return Err("it is a test".into());
-    }
-    if let Some(attribute) = unknown_attribute(attrs, transparent) {
-        return Err(format!("its #[{attribute}] attribute may rewrite it; see transparent-attributes"));
     }
     if sig.unsafety.is_some() {
         return Err("it is unsafe".into());

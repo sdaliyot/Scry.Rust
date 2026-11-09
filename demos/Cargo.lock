@@ -438,6 +438,7 @@ name = "console-demo"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "demo-macros",
  "parking_lot",
  "regex",
  "scry-rs",
@@ -739,6 +740,15 @@ name = "data-encoding"
 version = "2.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4583a4551df46e2792f82ceeac45e850d2e2d5debba0b91f102385cda5b11f06"
+
+[[package]]
+name = "demo-macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
 
 [[package]]
 name = "deranged"

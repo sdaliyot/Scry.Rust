@@ -29,6 +29,7 @@ mod functions;
 mod generate;
 mod generics;
 mod hookpoints;
+mod pieces;
 mod rewrite;
 mod tokens;
 mod wrapper;

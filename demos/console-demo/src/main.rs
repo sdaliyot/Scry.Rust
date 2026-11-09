@@ -7,6 +7,7 @@
 
 mod inventory;
 mod pricing;
+mod routes;
 mod util;
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -115,6 +116,7 @@ fn worker_loop(state: &AppState) {
 
         let mut stats = state.stats.lock().unwrap();
         stats.ticks += 1;
+        routes::serve(stats.ticks);
         let Some(item) = sold else { continue };
 
         let mut price = item.price_cents();

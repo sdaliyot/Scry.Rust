@@ -19,6 +19,7 @@ use std::process::Command;
 
 use crate::cfg::Cfg;
 use crate::config::Config;
+use crate::pieces::{self, Dropped, Located};
 use crate::rewrite::{Options, Paths, normalize, rewrite_crate};
 
 /// Set by `cargo scry` to an id of the generator build. Recorded as an environment dependency of
@@ -116,10 +117,13 @@ impl Invocation {
 
 /// Compiles one crate: rewritten if it opted in, as is otherwise.
 ///
-/// Generated code must never be what breaks a build. So a rewritten crate that fails to compile is
-/// compiled again without hook points, and if that fails too, from its original sources. Each
-/// attempt's output is held back until it is the one kept, so a real error in the app's own code
-/// is reported once, against the original files, and only a failure of the generated code warns.
+/// Generated code must never be what breaks a build. Every function gets a call shim and a hook
+/// point whatever its attribute macros do to it, and a rewritten crate that fails to compile is
+/// compiled again without the shims and hook points its errors point at (see `crate::pieces`),
+/// which are remembered for the next build. When an error points at none, the crate is compiled
+/// without hook points, and if that fails too, from its original sources. Each attempt's output is
+/// held back until it is the one kept, so a real error in the app's own code is reported once,
+/// against the original files, and only a failure of the generated code warns.
 pub fn run(rustc: OsString, args: Vec<OsString>) -> u8 {
     let args: Vec<String> = args.into_iter().map(|arg| arg.to_string_lossy().into_owned()).collect();
     let invocation = Invocation::parse(args);
@@ -127,52 +131,72 @@ pub fn run(rustc: OsString, args: Vec<OsString>) -> u8 {
         return exec(&rustc, &invocation.args);
     }
     let crate_name = invocation.values("--crate-name").next().unwrap_or("crate").to_owned();
+    let generator = env::var(GENERATOR_ID).unwrap_or_default();
+    let saved = mirror_root(&invocation).ok().map(|root| root.with_extension("dropped"));
+    let mut dropped = saved.as_deref().map(|path| Dropped::load(path, &generator)).unwrap_or_default();
+    let remembered = dropped.pieces.len();
     let mir = OnceCell::new();
     let mut first_error = None;
     let mut fresh_generics = false;
-    let mut attempts = std::collections::VecDeque::from([true, false]);
-    while let Some(hook_points) = attempts.pop_front() {
-        let attempt = match rewritten(&rustc, &invocation, hook_points, fresh_generics, &mir) {
+    let mut hook_points = true;
+    let mut retries = 0;
+    loop {
+        let attempt = match rewritten(&rustc, &invocation, hook_points, fresh_generics, &dropped, &mir) {
             Ok(attempt) => attempt,
             Err(error) => {
                 eprintln!("warning: scry: not generating a registry for `{crate_name}`: {error}");
                 return exec(&rustc, &invocation.args);
             }
         };
-        if hook_points && attempt.hook_points == 0 && !attempt.generics_reused {
+        if attempt.pieces.is_empty() && !attempt.generics_reused {
             // Nothing to leave out on a retry.
             return finish(&rustc, &attempt, exec(&rustc, &attempt.args));
         }
         let (code, stdout, stderr) = exec_captured(&rustc, &attempt.args);
         if code == 0 {
             replay(&stdout, &stderr);
-            if let Some(error) = &first_error {
+            if let Some(path) = &saved {
+                dropped.save(path, &generator);
+            }
+            let left_out = dropped.pieces.len() - remembered.min(dropped.pieces.len());
+            if !hook_points {
                 eprintln!(
-                    "warning: scry: `{crate_name}` did not compile with hook points, so it was built without them ({error}). \
-                     Please report this, with the function named in the error."
+                    "warning: scry: `{crate_name}` did not compile with hook points, so it was built without them ({}). \
+                     Please report this, with the function named in the error.",
+                    first_error.unwrap_or_default()
+                );
+            } else if left_out > 0 {
+                eprintln!(
+                    "warning: scry: left out {left_out} call shim(s) or hook point(s) of `{crate_name}` that did not compile \
+                     (usually under an attribute macro that rewrites its function); scry-report.txt lists them"
                 );
             }
             return finish(&rustc, &attempt, 0);
         }
-        if attempt.generics_reused {
+        let stderr_text = String::from_utf8_lossy(&stderr).into_owned();
+        if env::var_os(VERBOSE).is_some() {
+            eprintln!("scry: an attempt for `{crate_name}` failed:");
+            replay(&stdout, &stderr);
+        }
+        if attempt.generics_reused && !fresh_generics {
             // The last build's generic instantiations may be out of date in a way the key can't
             // see. Find them again before blaming the generated code.
-            if env::var_os(VERBOSE).is_some() {
-                eprintln!("scry: attempt for `{crate_name}` with the last build's generic instantiations failed:");
-                replay(&stdout, &stderr);
-            }
             fresh_generics = true;
-            attempts.push_front(hook_points);
+            continue;
+        }
+        let blame = pieces::blame(&stderr_text, &attempt.pieces);
+        let before = dropped.pieces.len();
+        dropped.pieces.extend(blame.pieces);
+        if dropped.pieces.len() > before && retries < MAX_RETRIES {
+            retries += 1;
             continue;
         }
         first_error.get_or_insert_with(|| first_error_message(&stderr));
-        if env::var_os(VERBOSE).is_some() {
-            eprintln!(
-                "scry: attempt {} for `{crate_name}` failed:",
-                if hook_points { "with hook points" } else { "without hook points" }
-            );
-            replay(&stdout, &stderr);
+        if hook_points {
+            hook_points = false;
+            continue;
         }
+        break;
     }
     let (code, stdout, stderr) = exec_captured(&rustc, &invocation.args);
     replay(&stdout, &stderr);
@@ -184,6 +208,20 @@ pub fn run(rustc: OsString, args: Vec<OsString>) -> u8 {
         );
     }
     code
+}
+
+/// How many times a crate is compiled again without the pieces its errors pointed at, before
+/// giving up on hook points. Each round drops every piece the errors of the last one named, so
+/// rounds are few: one for most crates, another when one error hid the next.
+const MAX_RETRIES: usize = 4;
+
+/// Where the rewritten copy of the crate goes: `target/<profile>/scry-src/<crate><extra>`.
+fn mirror_root(invocation: &Invocation) -> Result<PathBuf, String> {
+    let cwd = env::current_dir().map_err(|error| error.to_string())?;
+    let crate_name = invocation.values("--crate-name").next().unwrap_or("crate");
+    let extra = invocation.codegen("extra-filename").unwrap_or("");
+    let out_dir = invocation.values("--out-dir").next().map(|dir| normalize(&cwd.join(dir))).ok_or("no --out-dir")?;
+    Ok(out_dir.parent().unwrap_or(&out_dir).join("scry-src").join(format!("{crate_name}{extra}")))
 }
 
 fn finish(_rustc: &OsString, attempt: &Rewritten, code: u8) -> u8 {
@@ -203,8 +241,9 @@ struct Rewritten {
     /// Manifests whose `[package.metadata.scry]` shaped the rewrite: cargo does not rebuild for a
     /// metadata change on its own, so they are added to the dependency file.
     manifests: Vec<PathBuf>,
-    hook_points: usize,
     generics_reused: bool,
+    /// Where each call shim and hook point is in the rewritten files.
+    pieces: Vec<Located>,
 }
 
 fn rewritten(
@@ -212,6 +251,7 @@ fn rewritten(
     invocation: &Invocation,
     hook_points: bool,
     fresh_generics: bool,
+    dropped: &Dropped,
     mir: &OnceCell<Result<String, String>>,
 ) -> Result<Rewritten, String> {
     let cwd = env::current_dir().map_err(|error| error.to_string())?;
@@ -224,7 +264,7 @@ fn rewritten(
     let crate_name = invocation.values("--crate-name").next().unwrap_or("crate");
     let extra = invocation.codegen("extra-filename").unwrap_or("");
     let out_dir = invocation.values("--out-dir").next().map(|dir| normalize(&cwd.join(dir))).ok_or("no --out-dir")?;
-    let mirror_root = out_dir.parent().unwrap_or(&out_dir).join("scry-src").join(format!("{crate_name}{extra}"));
+    let mirror_root = mirror_root(invocation)?;
     let build_out_dir = env::var_os("OUT_DIR").map(PathBuf::from);
 
     let paths = Paths { manifest_dir: &manifest_dir, mirror_root: &mirror_root, out_dir: build_out_dir.as_deref() };
@@ -243,6 +283,7 @@ fn rewritten(
         ),
         dioxus: invocation.has_extern("dioxus"),
         cfg: Cfg::from_cfg_flags(invocation.values("--cfg")),
+        dropped: dropped.clone(),
         // A test harness supplies its own `main`.
         executable: invocation.values("--crate-type").any(|kind| kind == "bin")
             && !invocation.args.iter().any(|arg| arg == "--test"),
@@ -275,8 +316,8 @@ fn rewritten(
         dep_info,
         mappings,
         manifests,
-        hook_points: output.hook_points,
         generics_reused: output.generics_reused,
+        pieces: output.pieces,
     })
 }
 

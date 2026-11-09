@@ -135,18 +135,24 @@ The set is wider than for calls, because nothing has to be built from JSON:
 | `-> !` functions | A closure can't be declared `-> !` on stable Rust |
 | `-> impl Trait` | A closure can't be declared with that return type; would need a different shape |
 | Trait default method bodies; functions nested in other functions | Out of scope for now |
-| Unknown attribute macros, Dioxus components, `main`, tests | The same rules as for calls |
+| Dioxus components, `main`, tests | The same rules as for calls |
+| Under an attribute macro that breaks it | Tried, and left out if it doesn't compile (see below) |
 
 ### Safety net for the build
 
 A body wrapped in a closure compiles in the overwhelming majority of cases, but the borrow checker
 has corners where it doesn't. To make sure that can never break someone's build:
 
-1. If the rewritten crate fails to compile, the wrapper compiles it again with hooks off for that
-   crate, keeping everything else.
-2. If that fails too, it compiles the original sources, as it already does when the rewrite itself
+1. If the rewritten crate fails to compile, the wrapper traces each error to the call shims and
+   hook points it points at - through the macro expansions it came from, so an attribute macro
+   that rewrites a function is caught too - and compiles the crate again without just those. What
+   was left out is remembered for the next build. This is also what lets every function under an
+   attribute macro be tried, rather than skipped: only what doesn't compile under it goes.
+2. If errors point at no shim or hook point, the wrapper compiles the crate again with hooks off,
+   keeping everything else.
+3. If that fails too, it compiles the original sources, as it already does when the rewrite itself
    fails.
-3. It warns which step it fell back to, and shows only the errors of the last attempt. So a real
+4. It warns which step it fell back to, and shows only the errors of the last attempt. So a real
    error in the app's own code is reported once, against the original files.
 
 The retries happen only on failure, so a build that compiles costs nothing extra.

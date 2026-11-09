@@ -424,9 +424,11 @@ impl Hook {
     }
 
     fn remove(&self) {
-        self.site.active.store(false, Ordering::Relaxed);
-        if let Ok(mut hook) = self.site.hook.lock() {
-            *hook = None;
+        for site in twins(self.site) {
+            site.active.store(false, Ordering::Relaxed);
+            if let Ok(mut hook) = site.hook.lock() {
+                *hook = None;
+            }
         }
         if let Ok(mut hooks) = HOOKS.lock() {
             hooks.retain(|hook| hook.id != self.id);
@@ -483,6 +485,13 @@ fn sites() -> &'static [&'static HookSite] {
     &crate::__private::HOOK_SITES
 }
 
+/// The sites of one function: usually one, but an attribute macro may compile a function's body
+/// twice (into a handler and a plain function, say), and each copy has a hook point of its own. A
+/// hook is on all of them, so it sees every call whichever copy runs.
+fn twins(site: &'static HookSite) -> impl Iterator<Item = &'static HookSite> {
+    sites().iter().copied().filter(move |other| other.path == site.path)
+}
+
 /// Drops hooks nobody has read or waited on for their `ttl`.
 fn expire() {
     let expired: Vec<Arc<Hook>> =
@@ -506,7 +515,9 @@ fn site(path: &str) -> Result<&'static HookSite, Error> {
         return Ok(site);
     }
     let suffix = format!("::{path}");
-    let matches: Vec<&&HookSite> = sites().iter().filter(|site| site.path.ends_with(&suffix)).collect();
+    let mut matches: Vec<&&HookSite> = sites().iter().filter(|site| site.path.ends_with(&suffix)).collect();
+    matches.sort_by_key(|site| site.path);
+    matches.dedup_by_key(|site| site.path);
     match matches.as_slice() {
         [site] => Ok(site),
         [] => Err(Error::NoSuchFunction(path.to_owned())),
@@ -590,6 +601,7 @@ fn list(filter: &str) -> Value {
     let mut found: Vec<&HookSite> =
         sites().iter().copied().filter(|site| site.path.to_lowercase().contains(&filter)).collect();
     found.sort_by_key(|site| site.path);
+    found.dedup_by_key(|site| site.path);
     Value::Array(
         found
             .iter()
@@ -704,13 +716,15 @@ fn add(text: &str) -> Result<Value, Error> {
         last_used: Mutex::new(Instant::now()),
         scripts: Mutex::new(Scripts::default()),
     });
-    if let Ok(mut slot) = site.hook.lock() {
-        *slot = Some(Arc::clone(&hook));
-    }
     if let Ok(mut hooks) = HOOKS.lock() {
         hooks.push(Arc::clone(&hook));
     }
-    site.active.store(true, Ordering::Relaxed);
+    for site in twins(site) {
+        if let Ok(mut slot) = site.hook.lock() {
+            *slot = Some(Arc::clone(&hook));
+        }
+        site.active.store(true, Ordering::Relaxed);
+    }
     Ok(json!({ "hook": hook.id, "path": site.path, "signature": site.signature }))
 }
 

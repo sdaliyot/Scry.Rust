@@ -578,18 +578,22 @@ Some parameters and functions are handled specially:
   time any of the app's own functions runs inside it; a call before that, which needs tokio,
   panics, and the call reports it.
 
-**Attribute macros.** A function under an attribute macro is skipped, because the macro may rewrite
-it. The exceptions are macros known to keep the function callable as written: `tracing`'s
-`instrument`, `async_trait`, `cached`/`once`/`io_cached`, `memoize`, `logfn`, `trace` and
-`tauri::command`. A crate can vouch for others. They then get call shims and hook points:
+**Attribute macros.** A macro on a function can rewrite it in any way: keep it as written
+(`tracing::instrument`), move its body into a handler of its own (a web framework's route
+macros, Dioxus's `#[server]`, `#[get]` and `#[post]`), or turn it into a type. `cargo scry` doesn't
+need to know which. It gives every function its call shim and hook point whatever its attributes,
+and if the crate doesn't compile, it reads rustc's errors, traces each one to the shim or hook
+point it points at (through the macro expansions it came from), and builds again without those.
+So each function keeps what still works under its macro:
 
-```toml
-[package.metadata.scry]                 # or [workspace.metadata.scry]; the lists are combined
-transparent-attributes = ["my_retry", "metrics::timed"]   # an attribute's last segment or full path
-```
+- A macro that turns the function into a type: the hook point usually stays, the call shim goes.
+- A macro that rejects code it doesn't expect in a body: the call shim stays, the hook point goes.
+- A macro that compiles the body twice: one hook sees the calls of both copies.
 
-If a listed macro does rewrite the body, the build falls back as described under hooks below.
-`scry-report.txt` lists every skipped function and why.
+What was left out is remembered for the crate's next build, so only the first build of a crate
+pays for the extra compile, usually one. `cargo scry` says how many pieces it left out, and
+`scry-report.txt` lists each function and what it kept: `+ fn login (under #[post])`, or
+`- fn index: skipped, its call shim did not compile under its #[get] attribute`.
 
 Scripts call a value's methods with method syntax. When the type has its own method with the same
 name and argument count as one of a node's methods (`Cache::get(key)`, `Inventory::len()`), the
@@ -705,9 +709,11 @@ exclude = ["crate::util::next_random", "crate::auth::*"]
 - `const` and `unsafe` functions, `#[track_caller]`
 - functions returning `!` or `impl Trait`
 - a body starting with an inner attribute
-- `main`, tests, UI components, and functions under attribute macros not known or listed (see above)
+- `main`, tests and UI components
+- a function whose attribute macro doesn't keep a hook point compiling (see above)
 
-If a crate doesn't compile with its hook points, `cargo scry` builds it again without them and warns.
+If a crate doesn't compile with its hook points and the errors don't point at particular ones,
+`cargo scry` builds it again without any and warns.
 `SCRY_VERBOSE=1` shows why. See [docs/design/hooks.md](docs/design/hooks.md) for the design.
 
 ## Third-party types

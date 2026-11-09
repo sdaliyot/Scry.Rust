@@ -38,6 +38,7 @@ use crate::edits::{Edits, Source};
 use crate::functions::{self, Callee};
 use crate::generics::{self, Index, Use};
 use crate::hookpoints;
+use crate::pieces::{Dropped, Part, Piece};
 use crate::tokens;
 
 /// Hooks whose result is a state handle worth tracking.
@@ -89,8 +90,8 @@ pub struct Context<'a> {
     pub crate_name: &'a str,
     /// Hook points are compiled in, with these exclusions; `None` when they are off.
     pub hook_points: Option<&'a Config>,
-    /// Attribute macros the manifest says leave a function as written.
-    pub transparent: &'a [String],
+    /// Call shims and hook points left out, because they did not compile (see `crate::pieces`).
+    pub dropped: &'a Dropped,
 }
 
 pub struct Generator<'a> {
@@ -276,7 +277,7 @@ impl<'ast> Visit<'ast> for Generator<'_> {
             self.fn_shims(item);
             let name = item.sig.ident.to_string();
             if name != "main" {
-                self.hook_point(&item.attrs, &item.sig, &item.block, &name, std::slice::from_ref(&name));
+                self.hook_point(&item.attrs, &item.sig, &item.block, &name, std::slice::from_ref(&name), None);
             }
         }
         self.fns.push(item.sig.ident.to_string());
@@ -331,19 +332,19 @@ impl Generator<'_> {
     /// The shim for a module-level function, or one per concrete use of a generic one.
     fn fn_shims(&mut self, item: &ItemFn) {
         let name = item.sig.ident.to_string();
+        let piece = Piece::new(&self.module, &name, Part::Shim);
+        if let Some(reason) = self.dropped(&item.attrs, &piece) {
+            self.report.skipped("fn", &name, &reason);
+            return;
+        }
+        let under = self.under(&item.attrs);
         let cfgs = functions::cfgs(&item.attrs);
         let params: Vec<String> = item.sig.generics.type_params().map(|param| param.ident.to_string()).collect();
         if params.is_empty() || item.sig.generics.const_params().next().is_some() {
-            match functions::shim(
-                self.source,
-                &item.attrs,
-                &item.sig,
-                &Callee::new(None, None, cfgs),
-                self.cx.transparent,
-            ) {
+            match functions::shim(self.source, &item.attrs, &item.sig, &Callee::new(None, None, cfgs)) {
                 Ok(shim) => {
-                    self.edits.insert(self.source.end(item.block.brace_token.span.close()), shim);
-                    self.report.generated("fn", &name);
+                    self.edits.insert_piece(self.source.end(item.block.brace_token.span.close()), shim, piece);
+                    self.report.generated("fn", &format!("{name}{under}"));
                 }
                 Err(_) if name == "main" => {}
                 Err(reason) => self.report.skipped("fn", &name, &reason),
@@ -382,16 +383,16 @@ impl Generator<'_> {
             callee.turbofish = Some(quote!(::<#(#resolved),*>));
             callee.label = Some(label.clone());
             callee.variant = variant;
-            match functions::shim(self.source, &item.attrs, &item.sig, &callee, self.cx.transparent) {
+            match functions::shim(self.source, &item.attrs, &item.sig, &callee) {
                 Ok(shim) => {
                     shims.push_str(&shim);
-                    self.report.generated("fn", &label);
+                    self.report.generated("fn", &format!("{label}{under}"));
                 }
                 Err(reason) => problems.push(reason),
             }
         }
         if !shims.is_empty() {
-            self.edits.insert(self.source.end(item.block.brace_token.span.close()), shims);
+            self.edits.insert_piece(self.source.end(item.block.brace_token.span.close()), shims, piece);
         }
         if let Some(problem) = problems.first() {
             let reason = format!("generic, and not every instantiation can be called: {problem}");
@@ -493,11 +494,7 @@ impl Generator<'_> {
         let has_methods = item.items.iter().any(|item| matches!(item, syn::ImplItem::Fn(_)));
         let reason = functions::impl_skip_reason(&item.self_ty)
             .map(str::to_owned)
-            .or_else(|| item.unsafety.map(|_| "it is an unsafe impl".to_owned()))
-            .or_else(|| {
-                functions::unknown_attribute(&item.attrs, self.cx.transparent)
-                    .map(|attribute| format!("its #[{attribute}] attribute may rewrite it; see transparent-attributes"))
-            });
+            .or_else(|| item.unsafety.map(|_| "it is an unsafe impl".to_owned()));
         if let Some(reason) = reason {
             if has_methods {
                 self.report.skipped("impl", &label, &format!("methods not callable: {reason}"));
@@ -506,9 +503,7 @@ impl Generator<'_> {
         }
         if item.generics.params.is_empty() {
             let shims = self.impl_block_shims(item, &HashMap::new(), None);
-            if !shims.is_empty() {
-                self.edits.insert(self.source.end(item.brace_token.span.close()), shims);
-            }
+            self.insert_shims(item, shims);
             return;
         }
 
@@ -529,12 +524,12 @@ impl Generator<'_> {
             };
             self.report.skipped("impl", &label, reason);
         }
-        let mut shims = String::new();
+        let mut shims = Vec::new();
         for (variant, instance) in found.iter().enumerate() {
             match self.resolve_all(&instance.args, params.len()) {
                 Ok(resolved) => {
                     let subst: HashMap<String, Type> = params.iter().cloned().zip(resolved).collect();
-                    shims.push_str(&self.impl_block_shims(item, &subst, Some((instance, variant))));
+                    shims.extend(self.impl_block_shims(item, &subst, Some((instance, variant))));
                 }
                 Err(problem) => {
                     let label = format!("{label} with <{}>", instance.args.join(", "));
@@ -542,8 +537,19 @@ impl Generator<'_> {
                 }
             }
         }
-        if !shims.is_empty() {
-            self.edits.insert(self.source.end(item.brace_token.span.close()), shims);
+        self.insert_shims(item, shims);
+    }
+
+    /// Each method's shims after the impl block, each a piece of its own. When an attribute macro
+    /// on the block may report its errors there, the block is marked as part of each.
+    fn insert_shims(&mut self, item: &ItemImpl, shims: Vec<(String, Piece)>) {
+        let block = functions::unknown_attribute(&item.attrs)
+            .map(|_| (self.source.start(item.span()), self.source.end(item.brace_token.span.close())));
+        for (shim, piece) in shims {
+            if let Some((start, end)) = block {
+                self.edits.mark(start, end, piece.clone());
+            }
+            self.edits.insert_piece(self.source.end(item.brace_token.span.close()), shim, piece);
         }
     }
 
@@ -554,12 +560,12 @@ impl Generator<'_> {
         item: &ItemImpl,
         subst: &HashMap<String, Type>,
         instance: Option<(&Instance, usize)>,
-    ) -> String {
+    ) -> Vec<(String, Piece)> {
         let concrete_self = match functions::spell(&item.self_ty, None, subst) {
             Ok(ty) => ty,
             Err(reason) => {
                 self.report.skipped("impl", &functions::compact(&item.self_ty), &reason);
-                return String::new();
+                return Vec::new();
             }
         };
         let concrete_trait = match &item.trait_ {
@@ -567,7 +573,7 @@ impl Generator<'_> {
                 let as_type: Type = syn::parse_quote!(#path);
                 match functions::spell(&as_type, None, subst) {
                     Ok(Type::Path(path)) => Some(path.path),
-                    _ => return String::new(),
+                    _ => return Vec::new(),
                 }
             }
             None => None,
@@ -578,10 +584,19 @@ impl Generator<'_> {
             format!("{}<{}>", base.split('<').next().unwrap_or(&base), instance.args.join(", "))
         });
         let self_name = self_label.clone().unwrap_or_else(|| functions::compact(&item.self_ty));
-        let mut shims = String::new();
+        let base_name = functions::compact(&item.self_ty);
+        let base_name = base_name.split('<').next().unwrap_or(&base_name).to_owned();
+        let mut shims = Vec::new();
         for impl_item in &item.items {
             let syn::ImplItem::Fn(method) = impl_item else { continue };
             let name = format!("{self_name}::{}", method.sig.ident);
+            let piece = Piece::new(&self.module, &format!("{base_name}::{}", method.sig.ident), Part::Shim);
+            let attrs: Vec<Attribute> = item.attrs.iter().chain(&method.attrs).cloned().collect();
+            if let Some(reason) = self.dropped(&attrs, &piece) {
+                self.report.skipped("method", &name, &reason);
+                continue;
+            }
+            let under = self.under(&attrs);
             if let Some((instance, _)) = instance
                 && method.sig.generics.where_clause.is_some()
                 && !instance.called.contains(&method.sig.ident.to_string())
@@ -597,15 +612,35 @@ impl Generator<'_> {
             callee.subst = subst.clone();
             callee.label = self_label.clone();
             callee.variant = instance.map_or(0, |(_, variant)| variant);
-            match functions::shim(self.source, &method.attrs, &method.sig, &callee, self.cx.transparent) {
+            match functions::shim(self.source, &method.attrs, &method.sig, &callee) {
                 Ok(shim) => {
-                    shims.push_str(&shim);
-                    self.report.generated("method", &name);
+                    shims.push((shim, piece));
+                    self.report.generated("method", &format!("{name}{under}"));
                 }
                 Err(reason) => self.report.skipped("method", &name, &reason),
             }
         }
         shims
+    }
+
+    /// Why `piece` is left out, if it is: it did not compile in an earlier attempt.
+    fn dropped(&self, attrs: &[Attribute], piece: &Piece) -> Option<String> {
+        if !self.cx.dropped.contains(piece) {
+            return None;
+        }
+        let what = match piece.part {
+            Part::Shim => "its call shim",
+            Part::HookPoint => "its hook point",
+        };
+        Some(match functions::unknown_attribute(attrs) {
+            Some(attribute) => format!("{what} did not compile under its #[{attribute}] attribute, which rewrites it"),
+            None => format!("{what} did not compile"),
+        })
+    }
+
+    /// For the report: ` (under #[attr])` for code under an attribute macro not known to keep it.
+    fn under(&self, attrs: &[Attribute]) -> String {
+        functions::unknown_attribute(attrs).map(|attribute| format!(" (under #[{attribute}])")).unwrap_or_default()
     }
 
     /// A hook point in a function's body, unless hooks are off, the function is excluded, or it
@@ -618,6 +653,7 @@ impl Generator<'_> {
         block: &syn::Block,
         label: &str,
         segments: &[String],
+        outer: Option<(usize, usize)>,
     ) {
         let Some(config) = self.cx.hook_points else { return };
         let mut path = vec!["crate".to_owned()];
@@ -635,17 +671,34 @@ impl Generator<'_> {
         } else if attrs.iter().any(|attr| attr.path().is_ident("test") || attr.path().is_ident("bench")) {
             Some("it is a test".to_owned())
         } else {
-            functions::unknown_attribute(attrs, self.cx.transparent)
-                .map(|attribute| format!("its #[{attribute}] attribute may rewrite it; see transparent-attributes"))
+            None
         };
         if let Some(reason) = reason {
             self.report.skipped("hook point", label, &reason);
             return;
         }
+        let piece = Piece::new(&self.module, label, Part::HookPoint);
+        if let Some(reason) = self.dropped(attrs, &piece) {
+            self.report.skipped("hook point", label, &reason);
+            return;
+        }
         match hookpoints::hook_point(self.source, attrs, sig, label) {
             Ok(point) => {
-                self.edits.insert(self.source.end(block.brace_token.span.open()), point.prefix);
-                self.edits.insert(self.source.start(block.brace_token.span.close()), point.suffix);
+                // An attribute macro may report trouble with the hook point at its own tokens or
+                // the function's: those count against the hook point too.
+                let macro_span = outer.or_else(|| {
+                    functions::unknown_attribute(attrs).map(|_| {
+                        let start = attrs
+                            .first()
+                            .map_or_else(|| self.source.start(sig.span()), |attr| self.source.start(attr.span()));
+                        (start, self.source.end(block.brace_token.span.close()))
+                    })
+                });
+                if let Some((start, end)) = macro_span {
+                    self.edits.mark(start, end, piece.clone());
+                }
+                self.edits.insert_piece(self.source.end(block.brace_token.span.open()), point.prefix, piece.clone());
+                self.edits.insert_piece(self.source.start(block.brace_token.span.close()), point.suffix, piece);
                 self.hook_points += 1;
             }
             Err(reason) => self.report.skipped("hook point", label, &reason),
@@ -662,14 +715,9 @@ impl Generator<'_> {
             _ => None,
         }
         .unwrap_or_else(|| functions::compact(&item.self_ty));
-        if let Some(attribute) = functions::unknown_attribute(&item.attrs, self.cx.transparent) {
-            self.report.skipped(
-                "hook point",
-                &format!("impl {self_name}"),
-                &format!("its #[{attribute}] attribute may rewrite it; see transparent-attributes"),
-            );
-            return;
-        }
+        // An attribute macro on the block may report trouble with any method's hook point there.
+        let block = functions::unknown_attribute(&item.attrs)
+            .map(|_| (self.source.start(item.span()), self.source.end(item.brace_token.span.close())));
         for impl_item in &item.items {
             let syn::ImplItem::Fn(method) = impl_item else { continue };
             let name = method.sig.ident.to_string();
@@ -677,7 +725,7 @@ impl Generator<'_> {
                 Some((_, path, _)) => format!("<{self_name} as {}>::{name}", functions::compact(path)),
                 None => format!("{self_name}::{name}"),
             };
-            self.hook_point(&method.attrs, &method.sig, &method.block, &label, &[self_name.clone(), name]);
+            self.hook_point(&method.attrs, &method.sig, &method.block, &label, &[self_name.clone(), name], block);
         }
     }
 
@@ -1197,6 +1245,21 @@ mod tests {
     }
 
     fn rewrite_with(text: &str, hooks: bool, mir: &str, hook_points: Option<&Config>) -> (String, String) {
+        rewrite_full(text, hooks, mir, hook_points, &Dropped::default())
+    }
+
+    /// The same, leaving out the pieces in `dropped`.
+    fn rewrite_dropping(text: &str, hook_points: Option<&Config>, dropped: &Dropped) -> (String, String) {
+        rewrite_full(text, false, "", hook_points, dropped)
+    }
+
+    fn rewrite_full(
+        text: &str,
+        hooks: bool,
+        mir: &str,
+        hook_points: Option<&Config>,
+        dropped: &Dropped,
+    ) -> (String, String) {
         let source = Source::new(text.to_owned());
         let syntax = syn::parse_file(text).unwrap();
         let mut report = Report::default();
@@ -1215,7 +1278,7 @@ mod tests {
             generics: true,
             crate_name: "app",
             hook_points,
-            transparent: &["my_macro".to_owned()],
+            dropped,
         };
         let mut edits = Edits::default();
         Generator::new(&source, &mut edits, &cx, &mut report, true, Vec::new()).visit_file(&syntax);
@@ -1360,7 +1423,6 @@ impl Default for S { fn default() -> Self { S } }
             ("fn takes_copy", "which no type is picked for"),
             ("fn card", "UI component"),
             ("fn App", "UI component"),
-            ("fn wrapped", "#[tokio::main] attribute"),
             ("impl Wrap<T>", "never calls its methods with concrete types"),
         ] {
             assert!(
@@ -1369,6 +1431,8 @@ impl Default for S { fn default() -> Self { S } }
 {report}"
             );
         }
+        // Attempted under a macro not known to keep it; dropped later only if it doesn't compile.
+        assert!(report.contains("+ fn wrapped (under #[tokio::main])"), "{report}");
         assert!(!report.contains("fn main") && !report.contains("inner"), "{report}");
 
         let shim = |name: &str| out.lines().find(|line| line.contains(&format!("fn {name}"))).unwrap().to_owned();
@@ -1524,23 +1588,45 @@ impl Shell { #[cfg(feature = "desktop")] fn open() { LaunchBuilder::new().launch
     }
 
     #[test]
-    fn known_and_listed_attribute_macros_keep_shims_and_hook_points() {
+    fn functions_under_any_attribute_macro_get_shims_and_hook_points() {
         let text = "#[tracing::instrument] fn traced(a: u32) -> u32 { a }
 #[cached::proc_macro::cached] fn cached(a: u32) -> u32 { a }
-#[my_macro] fn listed(a: u32) -> u32 { a }
 #[other::rewrite] fn unknown(a: u32) -> u32 { a }
 ";
         let config = Config::default();
         let (out, report) = rewrite_with(text, false, "", Some(&config));
-        let lines: Vec<&str> = out.lines().collect();
-        for line in &lines[..3] {
+        for line in out.lines() {
             assert!(line.contains("static __SCRY_HOOK :") && line.contains("__SCRY_FN_"), "{line}\n{report}");
         }
-        assert!(!lines[3].contains("__SCRY"), "{}", lines[3]);
+        // Only the one not known to keep its function is attempted, as the report says.
+        assert!(report.contains("+ fn unknown (under #[other::rewrite])"), "{report}");
+        assert!(report.contains("+ fn traced\n"), "{report}");
+    }
+
+    #[test]
+    fn pieces_that_did_not_compile_are_left_out() {
+        let text = "#[web::get] fn index() -> u32 { 1 }
+#[web::post] fn submit(a: u32) -> u32 { a }
+struct Api;
+#[web::routes] impl Api { fn list(&self) -> u32 { 2 } fn count(&self) -> u32 { 3 } }
+";
+        let mut dropped = Dropped::default();
+        dropped.pieces.insert(Piece::new(&[], "index", Part::Shim));
+        dropped.pieces.insert(Piece::new(&[], "submit", Part::HookPoint));
+        dropped.pieces.insert(Piece::new(&[], "Api::list", Part::Shim));
+        let config = Config::default();
+        let (out, report) = rewrite_dropping(text, Some(&config), &dropped);
+        let lines: Vec<&str> = out.lines().collect();
+        assert!(lines[0].contains("__SCRY_HOOK") && !lines[0].contains("__SCRY_FN_"), "{}", lines[0]);
+        assert!(!lines[1].contains("__SCRY_HOOK") && lines[1].contains("__SCRY_FN_"), "{}", lines[1]);
+        assert_eq!(lines[3].matches("__SCRY_FN_").count(), 1, "{}", lines[3]);
         assert!(
-            report.contains("its #[other::rewrite] attribute may rewrite it; see transparent-attributes"),
+            report.contains("- fn index: skipped, its call shim did not compile under its #[web::get] attribute"),
             "{report}"
         );
+        assert!(report.contains("- hook point submit: skipped, its hook point did not compile"), "{report}");
+        assert!(report.contains("- method Api::list: skipped, its call shim did not compile under its #[web::routes]"));
+        assert!(report.contains("+ method Api::count (under #[web::routes])"), "{report}");
     }
 
     #[test]

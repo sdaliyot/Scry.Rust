@@ -316,3 +316,40 @@ fn a_failing_change_leaves_the_call_alone_and_is_recorded() {
     assert_eq!(bad["error"]["code"], json!("script_error"), "a script that does not compile is refused up front");
     run(&format!("hook remove {id}"));
 }
+
+/// One function whose body an attribute macro compiled twice - into a handler and a plain
+/// function, say - so it has two hook sites with the same path.
+macro_rules! copy_of_body {
+    ($name:ident) => {
+        fn $name(n: u64) -> u64 {
+            static SITE: HookSite = HookSite::new("hooks::handler", "fn handler(n: u64) -> u64");
+            #[scry::__private::linkme::distributed_slice(scry::__private::HOOK_SITES)]
+            #[linkme(crate = scry::__private::linkme)]
+            static REGISTERED: &HookSite = &SITE;
+            let call = SITE.enter(|capture| capture.arg("n", scry::__private::probe_ref!(&n)));
+            let result = n * 2;
+            if let Some(call) = call {
+                call.exit(scry::__private::probe_ref!(&result));
+            }
+            result
+        }
+    };
+}
+
+copy_of_body!(handler_as_route);
+copy_of_body!(handler_as_function);
+
+#[test]
+fn a_hook_sees_every_copy_of_a_body() {
+    let listed = run("hooks hooks::handler");
+    assert_eq!(listed.as_array().unwrap().len(), 1, "one function, listed once: {listed}");
+    let id = add("handler", "");
+    handler_as_route(1);
+    handler_as_function(2);
+    let calls = run(&format!("hook read {id}"))["calls"].clone();
+    let args: Vec<&Value> = calls.as_array().unwrap().iter().map(|call| &call["args"]["n"]).collect();
+    assert_eq!(args, [&json!(1), &json!(2)]);
+    run(&format!("hook remove {id}"));
+    handler_as_route(3);
+    assert!(run("hooks hooks::handler")[0]["hook"].is_null());
+}

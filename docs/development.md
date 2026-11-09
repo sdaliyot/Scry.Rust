@@ -88,8 +88,12 @@ The generator's modules, in `scry-rs-cargo/src`:
 itself, so `cargo scry` puts a copy of itself named `rustc` first on the `PATH` it passes to `dx`.
 The README's "Apps built with `dx`" section explains the details.
 
-If a crate doesn't compile with its hook points, `cargo scry` builds it again without them and
-warns. `SCRY_VERBOSE=1` shows why, along with the features it turns on.
+Every function gets its call shim and hook point, whatever attribute macros it has. If the crate
+doesn't compile, `pieces.rs` traces rustc's JSON errors to the shims and hook points they point at,
+through the macro expansions they came from, and the crate is built again without those; what was
+left out is saved next to the rewritten sources (`<crate>.dropped`) for the next build. Errors that
+point at no piece fall back to a build without hook points, then to the original sources, with a
+warning. `SCRY_VERBOSE=1` shows each failed attempt, along with the features it turns on.
 
 [`design/hooks.md`](design/hooks.md) explains the design of hooks.
 
