@@ -572,7 +572,9 @@ Some parameters and functions are handled specially:
   8 seconds is cancelled with `timeout`, before the endpoint's 10-second wait for the registry
   would give up with `target_busy`. In a Dioxus app that thread is the UI thread: the UI
   waits, and a future that waits on the UI only ends in that timeout. A runtime the app builds by
-  hand after `main` starts isn't found, and a future that needs it panics.
+  hand after `main` starts (`Runtime::new()?.block_on(...)`, as servers often do) is found the first
+  time any of the app's own functions runs inside it; a call before that, which needs tokio,
+  panics, and the call reports it.
 
 **Attribute macros.** A function under an attribute macro is skipped, because the macro may rewrite
 it. The exceptions are macros known to keep the function callable as written: `tracing`'s
@@ -791,7 +793,9 @@ every line where it was, so errors, panics and the debugger still point at the o
 - a hook point in every hookable function (see above)
 - the endpoint, started at the top of `main`. For Dioxus, it is pumped from each root component the
   crate launches (`launch(App)`, `LaunchBuilder::...launch(App)`), from any function of the crate,
-  not only `main`.
+  not only `main`. Code a `#[cfg(feature = ...)]` leaves out of the build doesn't count, so a
+  server built from the same crate as its Dioxus client (`--features server`) launches nothing, and
+  its registry runs on a thread of its own, as a console app's does.
 
 The endpoint listens on `127.0.0.1` on a port the OS picks. It writes a descriptor holding the pid, the
 port and a random token to `%USERPROFILE%\.scry-rs\targets` (`~/.scry-rs/targets` elsewhere;

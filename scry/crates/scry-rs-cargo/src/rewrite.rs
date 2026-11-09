@@ -13,6 +13,7 @@ use std::path::{Component, Path, PathBuf};
 use quote::ToTokens;
 use syn::visit::Visit;
 
+use crate::cfg::Cfg;
 use crate::config::Config;
 use crate::edits::{Edits, Source};
 use crate::generate::{
@@ -67,6 +68,8 @@ struct File {
     syntax: syn::File,
     mods: Vec<(ModDecl, Option<PathBuf>)>,
     includes: Vec<Include>,
+    /// A `#[cfg]` on its `mod` declaration (or an outer one's) leaves it out of this build.
+    off: bool,
 }
 
 /// What kind of crate is being rewritten.
@@ -75,6 +78,8 @@ pub struct Options {
     pub dioxus: bool,
     /// It is an executable with a `main` to start the endpoint from.
     pub executable: bool,
+    /// The features the build has on, to tell which code it compiles.
+    pub cfg: Cfg,
     pub crate_name: String,
     /// The crate's `[package.metadata.scry]` settings.
     pub config: Config,
@@ -96,7 +101,7 @@ pub fn rewrite_crate(
     options: &Options,
     mir: &dyn Fn() -> Result<String, String>,
 ) -> Result<Output, String> {
-    let files = load(root, paths)?;
+    let files = load(root, paths, &options.cfg)?;
 
     let mut report = Report::default();
     let mut traits = TraitCollector::default();
@@ -104,8 +109,8 @@ pub fn rewrite_crate(
         traits.visit_file(&file.syntax);
     }
     let dyn_traits = resolve_dyn_traits(&traits.traits, &mut report);
-    let mut launches = LaunchCollector::default();
-    for file in &files {
+    let mut launches = LaunchCollector::new(&options.cfg);
+    for file in files.iter().filter(|file| !file.off) {
         launches.visit_file(&file.syntax);
     }
 
@@ -348,11 +353,11 @@ fn read_saved(path: &Path, key: &str) -> Option<String> {
 }
 
 /// Reads and parses the module tree, plus files a build script generated that the crate includes.
-fn load(root: &Path, paths: &Paths<'_>) -> Result<Vec<File>, String> {
+fn load(root: &Path, paths: &Paths<'_>, cfg: &Cfg) -> Result<Vec<File>, String> {
     let mut files = Vec::new();
-    let mut queue = VecDeque::from([(root.to_path_buf(), true, Vec::new())]);
+    let mut queue = VecDeque::from([(root.to_path_buf(), true, Vec::new(), false)]);
     let mut seen = HashSet::new();
-    while let Some((path, mod_rs, module)) = queue.pop_front() {
+    while let Some((path, mod_rs, module, off)) = queue.pop_front() {
         if !seen.insert(path.clone()) {
             continue;
         }
@@ -374,7 +379,7 @@ fn load(root: &Path, paths: &Paths<'_>) -> Result<Vec<File>, String> {
                     let mut child_module = module.clone();
                     child_module.extend(decl.inline_path.iter().cloned());
                     child_module.push(decl.name.clone());
-                    queue.push_back((child.clone(), *child_mod_rs, child_module));
+                    queue.push_back((child.clone(), *child_mod_rs, child_module, off || cfg.off(&decl.cfgs)));
                 }
                 (decl, child.map(|(child, _)| child))
             })
@@ -385,12 +390,12 @@ fn load(root: &Path, paths: &Paths<'_>) -> Result<Vec<File>, String> {
             for include in &includes {
                 if let Include::BuildOutput { file, .. } = include {
                     // An included file's items land in the including module.
-                    queue.push_back((out_dir.join(file), false, module.clone()));
+                    queue.push_back((out_dir.join(file), false, module.clone(), off));
                 }
             }
         }
 
-        files.push(File { original: path, module, source, syntax, mods, includes });
+        files.push(File { original: path, module, source, syntax, mods, includes, off });
     }
     Ok(files)
 }
@@ -482,6 +487,7 @@ mod tests {
             let options = Options {
                 dioxus: false,
                 executable: true,
+                cfg: crate::cfg::Cfg::default(),
                 crate_name: "demo".into(),
                 config,
                 hook_points: true,

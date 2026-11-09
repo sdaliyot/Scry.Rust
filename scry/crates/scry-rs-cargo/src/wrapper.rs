@@ -17,6 +17,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::cfg::Cfg;
 use crate::config::Config;
 use crate::rewrite::{Options, Paths, normalize, rewrite_crate};
 
@@ -241,6 +242,7 @@ fn rewritten(
             invocation.args.join("\n")
         ),
         dioxus: invocation.has_extern("dioxus"),
+        cfg: Cfg::from_cfg_flags(invocation.values("--cfg")),
         // A test harness supplies its own `main`.
         executable: invocation.values("--crate-type").any(|kind| kind == "bin")
             && !invocation.args.iter().any(|arg| arg == "--test"),

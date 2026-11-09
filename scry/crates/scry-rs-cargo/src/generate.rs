@@ -32,6 +32,7 @@ use syn::{
     TraitItem, TraitItemFn, Type, TypeParamBound, Visibility, WherePredicate,
 };
 
+use crate::cfg::Cfg;
 use crate::config::Config;
 use crate::edits::{Edits, Source};
 use crate::functions::{self, Callee};
@@ -126,16 +127,17 @@ impl<'a> Generator<'a> {
         }
         let name = item.sig.ident.to_string();
         let call = if self.entry && name == "main" {
-            if self.cx.hooks {
-                if roots.is_empty() {
-                    self.report.skipped(
-                        "endpoint",
-                        "main",
-                        "no `launch(Component)` found, so nothing runs the registry",
-                    );
-                }
+            if self.cx.hooks && !roots.is_empty() {
                 "::scry::__private::dioxus::start_endpoint(); "
             } else {
+                if self.cx.hooks {
+                    // A server built from the same crate as its Dioxus client, say.
+                    self.report.skipped(
+                        "Dioxus endpoint",
+                        "main",
+                        "this build launches no `launch(Component)`, so the registry runs on a thread of its own",
+                    );
+                }
                 "::scry::__private::start_endpoint(); "
             }
         } else if self.cx.hooks && roots.contains(&name) {
@@ -884,18 +886,25 @@ pub struct ModDecl {
     /// Where the declaration's own `#[path]` value is, to replace it; or where to insert one.
     pub path_literal: Option<(usize, usize)>,
     pub insert_at: usize,
+    /// The `#[cfg]` attributes on the declaration and on the inline modules it sits in.
+    pub cfgs: Vec<syn::Attribute>,
 }
 
 pub struct ModCollector<'a> {
     source: &'a Source,
     inline_path: Vec<String>,
+    inline_cfgs: Vec<syn::Attribute>,
     pub decls: Vec<ModDecl>,
 }
 
 impl<'a> ModCollector<'a> {
     pub fn new(source: &'a Source) -> Self {
-        Self { source, inline_path: Vec::new(), decls: Vec::new() }
+        Self { source, inline_path: Vec::new(), inline_cfgs: Vec::new(), decls: Vec::new() }
     }
+}
+
+fn cfg_attrs(attrs: &[syn::Attribute]) -> impl Iterator<Item = syn::Attribute> + '_ {
+    attrs.iter().filter(|attr| attr.path().is_ident("cfg")).cloned()
 }
 
 impl<'ast> Visit<'ast> for ModCollector<'_> {
@@ -917,17 +926,23 @@ impl<'ast> Visit<'ast> for ModCollector<'_> {
                 Visibility::Inherited => self.source.start(item.mod_token.span),
                 vis => self.source.start(vis.span()),
             };
+            let mut cfgs = self.inline_cfgs.clone();
+            cfgs.extend(cfg_attrs(&item.attrs));
             self.decls.push(ModDecl {
                 name,
                 inline_path: self.inline_path.clone(),
                 path_attr,
                 path_literal,
                 insert_at,
+                cfgs,
             });
         } else {
+            let outer = self.inline_cfgs.len();
+            self.inline_cfgs.extend(cfg_attrs(&item.attrs));
             self.inline_path.push(name);
             visit::visit_item_mod(self, item);
             self.inline_path.pop();
+            self.inline_cfgs.truncate(outer);
         }
     }
 }
@@ -1043,13 +1058,19 @@ fn mentions_self(tokens: &impl ToTokens) -> bool {
 /// `builder.launch(layout::Root)` - anywhere in it, not only in `main`: an app may launch from a
 /// `run()` that `main` dispatches to. They pump the endpoint's requests on the UI thread. Matched
 /// by the component's name, and only a capitalized one, as components are, so a `launch(config)`
-/// of something else is not mistaken for one. Of several, the first to mount pumps.
-#[derive(Default)]
-pub struct LaunchCollector {
+/// of something else is not mistaken for one. Of several, the first to mount pumps. Code a `#[cfg]`
+/// turns off in this build is left out ([`Cfg`]): a server built from the same crate as its Dioxus
+/// client launches nothing.
+pub struct LaunchCollector<'a> {
     pub roots: HashSet<String>,
+    cfg: &'a Cfg,
 }
 
-impl LaunchCollector {
+impl<'a> LaunchCollector<'a> {
+    pub fn new(cfg: &'a Cfg) -> Self {
+        Self { roots: HashSet::new(), cfg }
+    }
+
     fn root(&mut self, args: &syn::punctuated::Punctuated<Expr, syn::Token![,]>) {
         if let Some(Expr::Path(path)) = args.first()
             && path.qself.is_none()
@@ -1061,7 +1082,42 @@ impl LaunchCollector {
     }
 }
 
-impl<'ast> Visit<'ast> for LaunchCollector {
+impl<'ast> Visit<'ast> for LaunchCollector<'_> {
+    fn visit_item(&mut self, item: &'ast syn::Item) {
+        let attrs = match item {
+            syn::Item::Fn(item) => &item.attrs,
+            syn::Item::Mod(item) => &item.attrs,
+            syn::Item::Impl(item) => &item.attrs,
+            syn::Item::Trait(item) => &item.attrs,
+            syn::Item::Const(item) => &item.attrs,
+            syn::Item::Static(item) => &item.attrs,
+            syn::Item::Macro(item) => &item.attrs,
+            _ => return visit::visit_item(self, item),
+        };
+        if !self.cfg.off(attrs) {
+            visit::visit_item(self, item);
+        }
+    }
+
+    fn visit_impl_item_fn(&mut self, item: &'ast syn::ImplItemFn) {
+        if !self.cfg.off(&item.attrs) {
+            visit::visit_impl_item_fn(self, item);
+        }
+    }
+
+    fn visit_stmt(&mut self, stmt: &'ast syn::Stmt) {
+        let attrs = match stmt {
+            syn::Stmt::Local(local) => &local.attrs,
+            syn::Stmt::Expr(Expr::Call(call), _) => &call.attrs,
+            syn::Stmt::Expr(Expr::MethodCall(call), _) => &call.attrs,
+            syn::Stmt::Expr(Expr::Block(block), _) => &block.attrs,
+            _ => return visit::visit_stmt(self, stmt),
+        };
+        if !self.cfg.off(attrs) {
+            visit::visit_stmt(self, stmt);
+        }
+    }
+
     fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
         if let Expr::Path(func) = &*call.func
             && func.path.segments.last().is_some_and(|segment| segment.ident == "launch")
@@ -1430,11 +1486,41 @@ fn other() { dioxus::launch(App); rocket.launch(config); Server::launch(settings
 ",
         )
         .unwrap();
-        let mut launches = LaunchCollector::default();
+        let cfg = Cfg::default();
+        let mut launches = LaunchCollector::new(&cfg);
         launches.visit_file(&file);
         let mut roots: Vec<&String> = launches.roots.iter().collect();
         roots.sort();
         assert_eq!(roots, ["App", "RootLayout"], "only capitalized components, by their last segment");
+    }
+
+    #[test]
+    fn leaves_out_launches_this_build_does_not_compile() {
+        // One crate, built as a server or as its Dioxus client, as a fullstack app is.
+        let file = syn::parse_file(
+            r#"fn main() {
+    #[cfg(feature = "server")]
+    server::run();
+    #[cfg(not(feature = "server"))]
+    dioxus::launch(Splash);
+}
+#[cfg(not(feature = "server"))]
+mod client { pub fn run() { app.launch(layout::RootLayout); } }
+impl Shell { #[cfg(feature = "desktop")] fn open() { LaunchBuilder::new().launch(Desktop); } }
+"#,
+        )
+        .unwrap();
+        let server = Cfg::from_cfg_flags(["feature=\"server\""].into_iter());
+        let mut launches = LaunchCollector::new(&server);
+        launches.visit_file(&file);
+        assert!(launches.roots.is_empty(), "{:?}", launches.roots);
+
+        let client = Cfg::from_cfg_flags(["feature=\"desktop\""].into_iter());
+        let mut launches = LaunchCollector::new(&client);
+        launches.visit_file(&file);
+        let mut roots: Vec<&String> = launches.roots.iter().collect();
+        roots.sort();
+        assert_eq!(roots, ["Desktop", "RootLayout", "Splash"]);
     }
 
     #[test]

@@ -61,10 +61,12 @@ impl HookSite {
         Self { path, signature, active: AtomicBool::new(false), hook: Mutex::new(None) }
     }
 
-    /// Called first thing in the hooked function. While the site is off this is one load; while
+    /// Called first thing in the hooked function. While the site is off this is one load (and one
+    /// more until the app's async runtime is found, see [`crate::run_async::note_runtime`]); while
     /// it is on, `capture` is called to snapshot the arguments.
     #[inline]
     pub fn enter(&'static self, capture: impl FnOnce(&mut Capture)) -> Option<CallGuard> {
+        crate::run_async::note_runtime();
         if self.active.load(Ordering::Relaxed) { self.enter_active(capture) } else { None }
     }
 

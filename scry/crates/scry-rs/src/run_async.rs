@@ -5,7 +5,9 @@
 //! app on tokio, the future runs inside the app's own runtime - remembered by the endpoint when it
 //! starts at the top of `main`, which `#[tokio::main]` already runs inside - so tokio's timers,
 //! I/O and `spawn` work as they do in the app. An app that builds its runtime by hand after `main`
-//! starts is not seen; a future that needs tokio then panics, which the call reports.
+//! starts (`Runtime::new()?.block_on(...)`) is seen as soon as any of its own code runs inside it:
+//! every function `cargo scry` compiles a hook point into notes the runtime it runs in, until one is
+//! found. Until then, a future that needs tokio panics, which the call reports.
 //!
 //! A call that has not finished after [`CALL_TIMEOUT`] fails with `timeout`, and its future is
 //! dropped - cancelled at the `.await` it was waiting at, as a dropped future always is. The
@@ -29,6 +31,16 @@ const _: () = assert!(CALL_TIMEOUT.as_millis() < crate::endpoint::REPLY_TIMEOUT.
 
 #[cfg(feature = "tokio")]
 static RUNTIME: std::sync::OnceLock<tokio::runtime::Handle> = std::sync::OnceLock::new();
+
+/// Notes the runtime the calling code runs in, until one is found: from every hook point, so an app
+/// that builds its runtime after `main` starts is seen too. Once one is found, this is one load.
+#[inline]
+pub fn note_runtime() {
+    #[cfg(feature = "tokio")]
+    if RUNTIME.get().is_none() {
+        capture_runtime();
+    }
+}
 
 /// Remembers the tokio runtime the calling code runs in, if any, for [`block_on`].
 pub fn capture_runtime() {
