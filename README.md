@@ -10,6 +10,8 @@ change probably did. Tests can reach past the UI into the state behind it. And a
 bad state can be examined while it is stuck, instead of restarted in the hope of catching it next
 time.**
 
+Its sibling, [Scry.NET](https://github.com/sdaliyot/Scry.NET), does the same for .NET applications.
+
 <br clear="left"/>
 
 Build an app with `cargo scry` instead of `cargo`, and it carries a registry of its own code: every
