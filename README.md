@@ -279,9 +279,13 @@ compiles patches with its own rustc call, and these patches get no Scry code.
 
 ## Trying it
 
-The repository has two demo apps: `console-demo`, a console app with shared state, third-party types
-and generic functions, and `dx-demo`, a Dioxus desktop app with a router, several windows and
-error boundaries. From a clone:
+The repository has three demo apps:
+
+- `console-demo`: a console app with shared state, third-party types and generic functions.
+- `web-demo`: a notes service on actix-web, whose handlers sit under its route macros.
+- `dx-demo`: a Dioxus desktop app with a router, several windows and error boundaries.
+
+From a clone:
 
 ```sh
 cargo install --path scry/crates/scry-rs-cargo
@@ -298,6 +302,17 @@ scry-rs roots
 scry-rs get APP.stats
 scry-rs set APP.rules[0].percent 50
 scry-rs set DISCOUNTS_ENABLED false
+```
+
+`cargo scry run -p web-demo` starts the web server, on port 8471 (`WEB_DEMO_PORT` changes it). Its
+handlers can't be called by name, since actix-web's macros turn them into types, but each has a
+hook point, so a hook sees every request and can change it:
+
+```sh
+scry-rs --process web-demo hook add add_note
+scry-rs --process web-demo hook before 1 'if args.body == "secret" { #{ args: #{ body: "[redacted]" } } }'
+curl -X POST -d secret localhost:8471/notes
+scry-rs --process web-demo get NOTES
 ```
 
 `cargo scry run -p dx-demo` starts the Dioxus demo. Its component state is under `ui`

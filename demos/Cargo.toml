@@ -2,7 +2,7 @@
 # consume it the way an outside project would - through a dependency, not as a workspace sibling.
 [workspace]
 resolver = "3"
-members = ["console-demo", "demo-macros", "dx-demo"]
+members = ["console-demo", "demo-macros", "dx-demo", "web-demo"]
 
 [workspace.package]
 edition = "2024"

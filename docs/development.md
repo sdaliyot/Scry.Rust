@@ -13,7 +13,7 @@ How the repository is laid out, how to build and test it, and how a release is m
 | `scry/crates/scry-rs-cargo` | `cargo scry`: builds an app with a generated registry |
 | `scry/crates/scry-rs-client` | The client library: finds running apps and sends them commands, from Rust (tests) |
 | `scry/crates/scry-rs-cli` | `scry-rs`: the command line that talks to running apps, on top of the client |
-| `demos/` | A console app and a Dioxus desktop app, in a workspace of their own |
+| `demos/` | A console app, a web server on actix-web, a Dioxus desktop app, and attribute macros the console app uses, in a workspace of their own |
 | `skills/scry-rs/` | The agent Skill |
 | `docs/` | This document, the [threat model](threat-model.md), and [design notes](design/) |
 
@@ -45,13 +45,13 @@ cargo build --manifest-path ../scry/Cargo.toml -p scry-rs-cargo -p scry-rs-cli
 ../scry/target/debug/scry-rs list
 ```
 
-[`scripts/e2e.sh`](../scripts/e2e.sh) does the same as a test: it builds both demos with
+[`scripts/e2e.sh`](../scripts/e2e.sh) does the same as a test: it builds the demos with
 `cargo scry`, runs them, and drives them with `scry-rs`, checking state, calls, hooks, `wait`, the
 page and screenshots. Run it from the repository root (on Windows, from Git Bash). On Linux without
 a desktop, run it under Xvfb: `xvfb-run -a scripts/e2e.sh`.
 
 CI ([`.github/workflows/ci.yml`](../.github/workflows/ci.yml)) runs the three commands above and
-builds both demos with `cargo scry` on every platform a release supports: Windows, Linux and
+builds the demos with `cargo scry` on every platform a release supports: Windows, Linux and
 macOS, each on x64 and Arm64. It runs `scripts/e2e.sh` on each of them too (on Linux under Xvfb),
 and checks the workspace with Rust 1.91.
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# End-to-end check: runs both demos as `cargo scry` builds and drives them with `scry-rs`, the way an
+# End-to-end check: runs the demos as `cargo scry` builds and drives them with `scry-rs`, the way an
 # agent or a test does, then from Rust through scry-rs-client's tests. CI runs it on every supported
 # platform; on Linux, under Xvfb:
 #
@@ -94,6 +94,43 @@ if [[ "$mode" == 600 ]]; then echo "ok    descriptor is private"; else
   echo "FAIL  descriptor mode is $mode, not 600"
   failures=$((failures + 1))
 fi
+
+echo "== web-demo"
+# http <name> <text the response must contain> <curl arguments...>
+http() {
+  local name=$1 expected=$2
+  shift 2
+  local reply
+  reply=$(curl -s -m 10 "$@" 2>&1)
+  if [[ "$reply" == *"$expected"* ]]; then
+    echo "ok    $name"
+  else
+    echo "FAIL  $name"
+    echo "      curl $*"
+    echo "      expected: $expected"
+    echo "      got:      ${reply:0:400}"
+    failures=$((failures + 1))
+  fi
+}
+web="http://127.0.0.1:${WEB_DEMO_PORT:=18471}"
+export WEB_DEMO_PORT
+"$demos/web-demo$exe" >"$work/web.log" 2>&1 &
+pids+=($!)
+check "--wait-for-target" 'web_demo::NOTES' --process web-demo --wait-for-target 60s roots
+# Its handlers are under actix-web's route macros, which turn them into types: hookable, not callable.
+check "a handler is not callable by name" '"no_such_function"' --process web-demo call list_notes
+check "hook on a handler returning impl Responder" '"hook":1' --process web-demo hook add list_notes
+http "a request" 'try `scry-rs get NOTES`' "$web/notes"
+check "the hook saw it" '"calls":[{' --process web-demo hook read 1
+check "hook on a handler" '"hook":2' --process web-demo hook add add_note
+check "change its requests" '"ok":true' --process web-demo hook before 2 'if args.body == "secret" { #{ args: #{ body: "[redacted]" } } }'
+http "a changed request" '2' -X POST -d 'secret' "$web/notes"
+check "the change reached the app" '"text":"[redacted]"' --process web-demo get 'NOTES[1]'
+check "a plain function is callable" '"result":3' --process web-demo call add '"from scry"'
+http "and the server sees its work" '3: from scry' "$web/notes"
+check "a result no code can name can't be replaced" '"ok":true' --process web-demo hook before 1 '#{ result: "x" }'
+http "so the handler still answers" '1: try' "$web/notes"
+check "and says why" 'a type no code can name' --process web-demo hook read 1
 
 echo "== dx-demo"
 "$demos/dx-demo$exe" >"$work/dx.log" 2>&1 &
