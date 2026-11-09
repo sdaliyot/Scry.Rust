@@ -509,6 +509,13 @@ pub fn spell(ty: &Type, self_ty: Option<&Type>, subst: &HashMap<String, Type>) -
     }
     impl VisitMut for Spell<'_> {
         fn visit_type_mut(&mut self, ty: &mut Type) {
+            // A generic parameter this instantiation gives a concrete type for.
+            let concrete = match &*ty {
+                Type::Path(path) if path.qself.is_none() => {
+                    path.path.get_ident().and_then(|ident| self.subst.get(&ident.to_string())).cloned()
+                }
+                _ => None,
+            };
             match ty {
                 Type::ImplTrait(_) => self.problem = Some("it takes an `impl Trait` argument"),
                 Type::Macro(_) => self.problem = Some("an argument type is a macro"),
@@ -517,14 +524,10 @@ pub fn spell(ty: &Type, self_ty: Option<&Type>, subst: &HashMap<String, Type>) -
                     Some(self_ty) => *ty = self_ty.clone(),
                     None => self.problem = Some("it mentions Self outside an impl"),
                 },
-                Type::Path(path)
-                    if path.qself.is_none()
-                        && let Some(ident) = path.path.get_ident()
-                        && let Some(concrete) = self.subst.get(&ident.to_string()) =>
-                {
-                    *ty = concrete.clone();
-                }
-                _ => visit_mut::visit_type_mut(self, ty),
+                _ => match concrete {
+                    Some(concrete) => *ty = concrete,
+                    None => visit_mut::visit_type_mut(self, ty),
+                },
             }
         }
 
