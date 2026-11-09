@@ -32,6 +32,11 @@ dioxus-router = ["dioxus", "dep:dioxus-router"]
 # `screenshot`: the page as the webview renders it. `cargo scry` turns this on for an app that depends on dioxus-desktop.
 dioxus-desktop = ["dioxus", "dep:dioxus-desktop", "dep:webview2-com", "dep:windows-core", "dep:webkit2gtk", "dep:cairo-rs", "dep:objc2", "dep:block2", "dep:objc2-foundation", "dep:objc2-app-kit", "dep:objc2-web-kit"]
 
+# docs.rs documents everything but `dioxus-desktop`, whose webview libraries (WebKitGTK on Linux)
+# docs.rs doesn't have; that feature only adds the `screenshot` command.
+[package.metadata.docs.rs]
+features = ["tokio", "dioxus", "dioxus-router"]
+
 [dependencies]
 scry-rs-derive = { version = "0.1.0", path = "../scry-rs-derive" }
 serde_json.workspace = true
